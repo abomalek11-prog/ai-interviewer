@@ -3,9 +3,20 @@ from sqlalchemy import select
 
 from app.core.security import TokenType, decode_token
 from app.models.user import User
-from app.schemas.auth import AuthResponse, LoginRequest, RefreshRequest, RegisterRequest, TokenPair
+from app.schemas.auth import (
+    AuthResponse,
+    ForgotPasswordRequest,
+    LoginRequest,
+    MessageResponse,
+    RefreshRequest,
+    RegisterRequest,
+    ResetPasswordRequest,
+    TokenPair,
+    VerifyOtpRequest,
+)
 from app.schemas.user import UserRead
 from app.services.auth_service import AuthService
+from app.services.password_reset_service import PasswordResetService
 from app.utils.dependencies import CurrentUser, DbSession
 
 router = APIRouter()
@@ -50,3 +61,24 @@ def refresh(payload: RefreshRequest, db: DbSession) -> TokenPair:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
     return AuthService(db).create_token_pair(user)
+
+
+@router.post("/forgot-password", response_model=MessageResponse)
+def forgot_password(payload: ForgotPasswordRequest, db: DbSession) -> MessageResponse:
+    PasswordResetService(db).request_otp(payload.email)
+    return MessageResponse(message="If that email is registered, a verification code has been sent.")
+
+
+@router.post("/verify-otp", response_model=MessageResponse)
+def verify_otp(payload: VerifyOtpRequest, db: DbSession) -> MessageResponse:
+    if not PasswordResetService(db).verify_otp(payload.email, payload.code):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired verification code")
+    return MessageResponse(message="Code verified")
+
+
+@router.post("/reset-password", response_model=MessageResponse)
+def reset_password(payload: ResetPasswordRequest, db: DbSession) -> MessageResponse:
+    ok = PasswordResetService(db).reset_password(payload.email, payload.code, payload.new_password)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired verification code")
+    return MessageResponse(message="Password has been reset")

@@ -1,3 +1,4 @@
+import secrets
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from uuid import uuid4
@@ -8,6 +9,18 @@ from passlib.context import CryptContext
 from app.core.config import settings
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+def generate_otp_code() -> str:
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def hash_otp_code(code: str) -> str:
+    return pwd_context.hash(code)
+
+
+def verify_otp_code(code: str, code_hash: str) -> bool:
+    return pwd_context.verify(code, code_hash)
 
 
 class TokenType(StrEnum):

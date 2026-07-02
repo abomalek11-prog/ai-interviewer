@@ -1,4 +1,6 @@
+import hashlib
 import json
+import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -6,6 +8,8 @@ from openai import OpenAI
 
 from app.core.config import settings
 from app.schemas.ai import AnswerEvaluation, GeneratedQuestion
+
+logger = logging.getLogger("app.ai")
 
 
 class BaseLLMProvider(ABC):
@@ -15,9 +19,7 @@ class BaseLLMProvider(ABC):
 
 
 class OpenAIProvider(BaseLLMProvider):
-    def __init__(self, api_key: str | None = settings.OPENAI_API_KEY, model: str = settings.OPENAI_MODEL):
-        if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is not configured")
+    def __init__(self, api_key: str = settings.OPENAI_API_KEY, model: str = settings.OPENAI_MODEL):
         self.client = OpenAI(api_key=api_key)
         self.model = model
 
@@ -35,11 +37,57 @@ class OpenAIProvider(BaseLLMProvider):
         return json.loads(content)
 
 
+class MockLLMProvider(BaseLLMProvider):
+    """Deterministic offline provider used when OPENAI_API_KEY is not configured.
+
+    Lets the interview flow run end-to-end (question generation, scoring) in local
+    / demo environments without requiring API credentials.
+    """
+
+    def complete_json(self, system_prompt: str, user_prompt: str) -> dict[str, Any] | list[Any]:
+        seed = int(hashlib.sha256(user_prompt.encode()).hexdigest(), 16)
+
+        if "questions" in system_prompt.lower() or "generate" in system_prompt.lower():
+            count = 5
+            for line in user_prompt.splitlines():
+                if line.lower().startswith("count:"):
+                    count = int(line.split(":", 1)[1].strip() or count)
+            return {
+                "questions": [
+                    {
+                        "prompt": f"Describe how you would approach challenge #{i + 1} for this role, "
+                        "covering trade-offs and how you would validate your solution.",
+                        "expected_topics": ["problem solving", "trade-offs", "validation"],
+                        "time_limit_seconds": 180,
+                    }
+                    for i in range(count)
+                ]
+            }
+
+        base = 55 + (seed % 40)
+        return {
+            "score": base,
+            "correctness": min(100, base + (seed % 7)),
+            "depth": min(100, base - (seed % 5)),
+            "clarity": min(100, base + (seed % 9) - 4),
+            "terminology": min(100, base - (seed % 6)),
+            "feedback": "Solid response with relevant detail; consider adding a concrete example next time.",
+            "strengths": ["Clear structure", "Relevant terminology"],
+            "improvements": ["Add a real-world example", "Discuss edge cases"],
+        }
+
+
 class AIService:
     """Provider-neutral AI interface for question generation and answer evaluation."""
 
     def __init__(self, provider: BaseLLMProvider | None = None):
-        self.provider = provider or OpenAIProvider()
+        if provider is not None:
+            self.provider = provider
+        elif settings.OPENAI_API_KEY:
+            self.provider = OpenAIProvider()
+        else:
+            logger.warning("OPENAI_API_KEY is not configured; using MockLLMProvider")
+            self.provider = MockLLMProvider()
 
     def evaluate_answer(self, question: str, answer: str, difficulty: str, interview_type: str) -> AnswerEvaluation:
         system_prompt = (
