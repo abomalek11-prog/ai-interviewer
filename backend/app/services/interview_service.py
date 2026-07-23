@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.candidate import Candidate
-from app.models.enums import SessionStatus
+from app.models.enums import SessionMode, SessionStatus
 from app.models.interview import Answer, Evaluation, InterviewSession, Question
 from app.models.job import Job
 from app.schemas.interview import AnswerSubmit, SessionCreate
@@ -14,7 +14,10 @@ from app.services.ai_service import AIService
 class InterviewService:
     def __init__(self, db: Session, ai_service: AIService | None = None):
         self.db = db
-        self.ai_service = ai_service or AIService()
+        self.ai_service = ai_service
+
+    def _ai(self, profile_id: str | None = None) -> AIService:
+        return self.ai_service or AIService(preferred_profile_id=profile_id)
 
     def create_session(self, owner_id: str, payload: SessionCreate) -> InterviewSession | None:
         job = self.db.scalar(select(Job).where(Job.id == payload.job_id, Job.owner_id == owner_id))
@@ -30,28 +33,31 @@ class InterviewService:
             job_id=job.id,
             candidate_id=candidate.id,
             difficulty=job.seniority.value,
+            mode=payload.mode,
+            ai_model_profile_id=payload.ai_model_profile_id or job.ai_model_profile_id,
             status=SessionStatus.IN_PROGRESS,
             started_at=datetime.now(UTC),
         )
         self.db.add(session)
         self.db.flush()
 
-        generated = self.ai_service.generate_questions(
-            interview_type=session.interview_type,
-            difficulty=session.difficulty,
-            count=min(job.task_count, 20),
-            focus_areas=[job.role_category.value],
-        )
-        for index, item in enumerate(generated):
-            self.db.add(
-                Question(
-                    session_id=session.id,
-                    order_index=index,
-                    prompt=item.prompt,
-                    expected_topics=item.expected_topics,
-                    time_limit_seconds=item.time_limit_seconds,
-                )
+        if payload.mode == SessionMode.STRUCTURED:
+            generated = self._ai(session.ai_model_profile_id).generate_questions(
+                interview_type=session.interview_type,
+                difficulty=session.difficulty,
+                count=min(job.task_count, 20),
+                focus_areas=[job.role_category.value],
             )
+            for index, item in enumerate(generated):
+                self.db.add(
+                    Question(
+                        session_id=session.id,
+                        order_index=index,
+                        prompt=item.prompt,
+                        expected_topics=item.expected_topics,
+                        time_limit_seconds=item.time_limit_seconds,
+                    )
+                )
 
         self.db.commit()
         return self.get_session(owner_id, session.id)
@@ -62,11 +68,12 @@ class InterviewService:
             .join(Job, Job.id == InterviewSession.job_id)
             .where(InterviewSession.id == session_id, Job.owner_id == owner_id)
             .options(
-                selectinload(InterviewSession.questions).selectinload(Question.answer).selectinload(Answer.evaluation)
+                selectinload(InterviewSession.questions).selectinload(Question.answer).selectinload(Answer.evaluation),
+                selectinload(InterviewSession.conversation_messages),
             )
         )
 
-    def list_sessions(self, owner_id: str, limit: int = 50) -> list[dict]:
+    def list_sessions(self, owner_id: str, limit: int = 50, candidate_id: str | None = None) -> list[dict]:
         query = (
             select(InterviewSession, Candidate.full_name, Job.title)
             .join(Job, Job.id == InterviewSession.job_id)
@@ -75,6 +82,8 @@ class InterviewService:
             .order_by(InterviewSession.created_at.desc())
             .limit(limit)
         )
+        if candidate_id:
+            query = query.where(InterviewSession.candidate_id == candidate_id)
         return [
             {"session": session, "candidate_name": candidate_name, "job_title": job_title}
             for session, candidate_name, job_title in self.db.execute(query).all()
@@ -93,7 +102,7 @@ class InterviewService:
         self.db.add(answer)
         self.db.flush()
 
-        evaluation_result = self.ai_service.evaluate_answer(
+        evaluation_result = self._ai(session.ai_model_profile_id).evaluate_answer(
             question=question.prompt,
             answer=payload.transcript,
             difficulty=session.difficulty,

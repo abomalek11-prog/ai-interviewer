@@ -26,7 +26,7 @@ class AnalyticsService:
         success_rate = round(len([s for s in scored if s >= 70]) / len(scored) * 100, 1) if scored else 0.0
         avg_ai_score = round(sum(scored) / len(scored), 1) if scored else 0.0
 
-        since = datetime.now(UTC) - timedelta(days=30)
+        since = (datetime.now(UTC) - timedelta(days=30)).replace(tzinfo=None)
         trend_counts: dict[str, int] = {}
         for session in completed:
             if session.completed_at and session.completed_at >= since:

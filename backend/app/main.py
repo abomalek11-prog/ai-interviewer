@@ -1,8 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.api.v1.router import api_router
 from app.core.config import settings
+from app.core.paths import UPLOADS_DIR
 
 
 def create_app() -> FastAPI:
@@ -15,6 +17,10 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    (UPLOADS_DIR / "avatars").mkdir(parents=True, exist_ok=True)
+    app.mount("/media", StaticFiles(directory=str(UPLOADS_DIR)), name="media")
 
     app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 

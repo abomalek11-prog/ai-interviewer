@@ -22,3 +22,8 @@ class UserUpdate(BaseModel):
     title: str | None = Field(default=None, max_length=120)
     bio: str | None = Field(default=None, max_length=2000)
     profile_picture_url: str | None = Field(default=None, max_length=500)
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8, max_length=128)

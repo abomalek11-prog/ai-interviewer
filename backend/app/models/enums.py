@@ -35,3 +35,13 @@ class SessionStatus(StrEnum):
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     ABANDONED = "abandoned"
+
+
+class SessionMode(StrEnum):
+    STRUCTURED = "structured"
+    LIVE = "live"
+
+
+class MessageRole(StrEnum):
+    AI = "ai"
+    CANDIDATE = "candidate"

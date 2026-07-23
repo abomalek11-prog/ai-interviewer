@@ -16,7 +16,11 @@ class Candidate(Base):
     full_name: Mapped[str] = mapped_column(String(160), nullable=False)
     email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     resume_url: Mapped[str | None] = mapped_column(String(500))
-    status: Mapped[CandidateStatus] = mapped_column(Enum(CandidateStatus, native_enum=False, length=20), default=CandidateStatus.NEW, nullable=False)
+    status: Mapped[CandidateStatus] = mapped_column(
+        Enum(CandidateStatus, native_enum=False, length=20, values_callable=lambda enum_cls: [e.value for e in enum_cls]),
+        default=CandidateStatus.NEW,
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

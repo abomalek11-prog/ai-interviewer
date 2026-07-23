@@ -2,12 +2,14 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.enums import SessionStatus
+from app.models.enums import MessageRole, SessionMode, SessionStatus
 
 
 class SessionCreate(BaseModel):
     job_id: str
     candidate_id: str
+    ai_model_profile_id: str | None = Field(default=None, max_length=80)
+    mode: SessionMode = SessionMode.STRUCTURED
 
 
 class QuestionRead(BaseModel):
@@ -55,6 +57,15 @@ class QuestionWithAnswer(QuestionRead):
     answer: AnswerRead | None = None
 
 
+class ConversationMessageRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    role: MessageRole
+    content: str
+    created_at: datetime
+
+
 class SessionRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -62,19 +73,23 @@ class SessionRead(BaseModel):
     job_id: str
     candidate_id: str
     status: SessionStatus
+    mode: SessionMode
     interview_type: str
     difficulty: str
+    ai_model_profile_id: str | None
     overall_score: int | None
     started_at: datetime | None
     completed_at: datetime | None
     created_at: datetime
     questions: list[QuestionWithAnswer] = Field(default_factory=list)
+    conversation_messages: list[ConversationMessageRead] = Field(default_factory=list)
 
 
 class SessionSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
+    candidate_id: str
     candidate_name: str
     job_title: str
     status: SessionStatus

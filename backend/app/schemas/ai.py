@@ -1,11 +1,19 @@
 from pydantic import BaseModel, Field
 
 
+class AIModelProfileRead(BaseModel):
+    id: str
+    label: str
+    model: str
+    is_available: bool
+
+
 class AnswerEvaluationRequest(BaseModel):
     question: str = Field(min_length=5)
     answer: str = Field(min_length=1)
     difficulty: str = "mid-level"
     interview_type: str = "technical"
+    ai_model_profile_id: str | None = None
 
 
 class AnswerEvaluation(BaseModel):
@@ -24,9 +32,14 @@ class QuestionGenerationRequest(BaseModel):
     difficulty: str = "mid-level"
     count: int = Field(default=5, ge=1, le=20)
     focus_areas: list[str] = Field(default_factory=list)
+    ai_model_profile_id: str | None = None
 
 
 class GeneratedQuestion(BaseModel):
     prompt: str
     expected_topics: list[str]
     time_limit_seconds: int = 180
+
+
+class TranscriptionResult(BaseModel):
+    text: str

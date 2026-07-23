@@ -14,12 +14,23 @@ class Job(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     owner_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(160), nullable=False)
-    role_category: Mapped[RoleCategory] = mapped_column(Enum(RoleCategory, native_enum=False, length=20), nullable=False)
-    seniority: Mapped[Seniority] = mapped_column(Enum(Seniority, native_enum=False, length=20), nullable=False)
-    status: Mapped[JobStatus] = mapped_column(Enum(JobStatus, native_enum=False, length=20), default=JobStatus.DRAFT, nullable=False)
+    role_category: Mapped[RoleCategory] = mapped_column(
+        Enum(RoleCategory, native_enum=False, length=20, values_callable=lambda enum_cls: [e.value for e in enum_cls]),
+        nullable=False,
+    )
+    seniority: Mapped[Seniority] = mapped_column(
+        Enum(Seniority, native_enum=False, length=20, values_callable=lambda enum_cls: [e.value for e in enum_cls]),
+        nullable=False,
+    )
+    status: Mapped[JobStatus] = mapped_column(
+        Enum(JobStatus, native_enum=False, length=20, values_callable=lambda enum_cls: [e.value for e in enum_cls]),
+        default=JobStatus.DRAFT,
+        nullable=False,
+    )
     description: Mapped[str | None] = mapped_column(Text)
     duration_minutes: Mapped[int] = mapped_column(default=45, nullable=False)
     task_count: Mapped[int] = mapped_column(default=12, nullable=False)
+    ai_model_profile_id: Mapped[str | None] = mapped_column(String(80))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

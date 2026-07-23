@@ -29,8 +29,36 @@ class AuthService:
 
     def authenticate(self, email: str, password: str) -> User | None:
         user = self.get_user_by_email(email)
-        if not user or not verify_password(password, user.hashed_password):
+        if not user or not user.hashed_password or not verify_password(password, user.hashed_password):
             return None
+        return user
+
+    def find_or_create_oauth_user(self, *, provider: str, provider_id: str, email: str, full_name: str) -> User:
+        user = self.db.scalar(
+            select(User).where(User.oauth_provider == provider, User.oauth_id == provider_id)
+        )
+        if user:
+            return user
+
+        user = self.get_user_by_email(email)
+        if user:
+            if not user.oauth_provider:
+                user.oauth_provider = provider
+                user.oauth_id = provider_id
+                self.db.commit()
+                self.db.refresh(user)
+            return user
+
+        user = User(
+            email=email.lower(),
+            full_name=full_name or email.split("@")[0],
+            hashed_password=None,
+            oauth_provider=provider,
+            oauth_id=provider_id,
+        )
+        self.db.add(user)
+        self.db.commit()
+        self.db.refresh(user)
         return user
 
     def create_token_pair(self, user: User) -> TokenPair:

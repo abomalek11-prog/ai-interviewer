@@ -26,6 +26,7 @@ def verify_otp_code(code: str, code_hash: str) -> bool:
 class TokenType(StrEnum):
     ACCESS = "access"
     REFRESH = "refresh"
+    OAUTH_STATE = "oauth_state"
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -56,4 +57,27 @@ def decode_token(token: str, expected_type: TokenType) -> dict:
 
     if payload.get("type") != expected_type.value:
         raise ValueError("Invalid token type")
+    return payload
+
+
+def create_oauth_state(data: dict, expires_delta: timedelta = timedelta(minutes=10)) -> str:
+    now = datetime.now(UTC)
+    payload = {
+        **data,
+        "type": TokenType.OAUTH_STATE.value,
+        "iat": now,
+        "exp": now + expires_delta,
+        "jti": str(uuid4()),
+    }
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def decode_oauth_state(token: str) -> dict:
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+    except JWTError as exc:
+        raise ValueError("Invalid or expired state") from exc
+
+    if payload.get("type") != TokenType.OAUTH_STATE.value:
+        raise ValueError("Invalid state type")
     return payload

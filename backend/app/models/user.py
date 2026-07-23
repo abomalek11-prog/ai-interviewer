@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, String, Text, func
+from sqlalchemy import Boolean, DateTime, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -9,10 +9,13 @@ from app.db.base import Base
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (UniqueConstraint("oauth_provider", "oauth_id", name="uq_users_oauth_identity"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
-    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    hashed_password: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    oauth_provider: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    oauth_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     full_name: Mapped[str] = mapped_column(String(120), nullable=False)
     title: Mapped[str | None] = mapped_column(String(120))
     bio: Mapped[str | None] = mapped_column(Text)
