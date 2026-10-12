@@ -15,6 +15,29 @@ def test_production_refuses_the_default_secret_key():
     assert make_settings(ENVIRONMENT="production", SECRET_KEY="a-long-random-production-value").SECRET_KEY
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgres://u:p@ep-x.neon.tech/db?sslmode=require",
+        "postgresql://u:p@ep-x.neon.tech/db?sslmode=require",
+        "postgresql+psycopg://u:p@ep-x.neon.tech/db?sslmode=require",
+    ],
+)
+def test_postgres_urls_use_the_installed_psycopg3_driver(url):
+    assert make_settings(DATABASE_URL=url).DATABASE_URL == "postgresql+psycopg://u:p@ep-x.neon.tech/db?sslmode=require"
+
+
+def test_sqlite_url_is_left_alone():
+    assert make_settings(DATABASE_URL="sqlite:///./dev.db").DATABASE_URL == "sqlite:///./dev.db"
+
+
+def test_render_public_url_fills_in_the_backend_base_url(monkeypatch):
+    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://interviewai-api.onrender.com/")
+    assert make_settings().OAUTH_REDIRECT_BASE_URL == "https://interviewai-api.onrender.com"
+    explicit = make_settings(OAUTH_REDIRECT_BASE_URL="https://api.example.com")
+    assert explicit.OAUTH_REDIRECT_BASE_URL == "https://api.example.com"
+
+
 def test_no_keys_means_no_profiles():
     assert make_settings().ai_model_profiles == []
 

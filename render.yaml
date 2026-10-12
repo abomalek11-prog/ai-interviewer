@@ -1,0 +1,33 @@
+# Render Blueprint for the API. Frontend is deployed separately on Vercel.
+# Free plan: no persistent disk, so the database lives on Neon (DATABASE_URL), and the
+# service sleeps after 15 idle minutes (first request after that takes ~30-60s).
+services:
+  - type: web
+    name: interviewai-amin-api
+    runtime: python
+    plan: free
+    region: frankfurt
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    # Migrations run on every start; they are idempotent once the schema is current.
+    startCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips="*"
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: ENVIRONMENT
+        value: production
+      - key: SECRET_KEY
+        generateValue: true
+      # Asked for in the dashboard when the Blueprint is created - never committed.
+      - key: DATABASE_URL
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODELS
+        value: nvidia/nemotron-3-ultra-550b-a55b:free,nvidia/nemotron-3-super-120b-a12b:free,openrouter/free
+      - key: BACKEND_CORS_ORIGINS
+        value: https://interviewai-amin.vercel.app
+      - key: FRONTEND_BASE_URL
+        value: https://interviewai-amin.vercel.app

@@ -2,7 +2,7 @@ from functools import cached_property
 import json
 import os
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -62,6 +62,25 @@ class Settings(BaseSettings):
     SMTP_USERNAME: str | None = None
     SMTP_PASSWORD: str | None = None
     SMTP_FROM_EMAIL: str = "no-reply@interviewai.app"
+
+    @field_validator("DATABASE_URL")
+    @classmethod
+    def _use_psycopg3_driver(cls, url: str) -> str:
+        # Hosts (Neon, Render, Heroku) hand out postgres:// or postgresql:// URLs, which
+        # SQLAlchemy maps to psycopg2 - not installed here. Point them at psycopg 3.
+        for prefix in ("postgres://", "postgresql://"):
+            if url.startswith(prefix):
+                return "postgresql+psycopg://" + url.removeprefix(prefix)
+        return url
+
+    @model_validator(mode="after")
+    def _public_url_from_host(self) -> "Settings":
+        # Render publishes the service's own https URL; use it for avatar links and OAuth
+        # callbacks unless OAUTH_REDIRECT_BASE_URL was set explicitly.
+        render_url = os.getenv("RENDER_EXTERNAL_URL")
+        if render_url and "OAUTH_REDIRECT_BASE_URL" not in self.model_fields_set:
+            self.OAUTH_REDIRECT_BASE_URL = render_url.rstrip("/")
+        return self
 
     @model_validator(mode="after")
     def _require_real_secret_in_production(self) -> "Settings":

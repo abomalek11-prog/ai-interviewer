@@ -9,6 +9,13 @@ from app.models.job import Job
 from app.schemas.analytics import AnalyticsSummary, DifficultyBreakdownItem, TrendPoint
 
 
+def _as_utc(value: datetime | None) -> datetime | None:
+    """SQLite hands back naive datetimes (stored as UTC), Postgres aware ones; compare as aware UTC."""
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=UTC)
+
+
 class AnalyticsService:
     def __init__(self, db: Session):
         self.db = db
@@ -26,11 +33,12 @@ class AnalyticsService:
         success_rate = round(len([s for s in scored if s >= 70]) / len(scored) * 100, 1) if scored else 0.0
         avg_ai_score = round(sum(scored) / len(scored), 1) if scored else 0.0
 
-        since = (datetime.now(UTC) - timedelta(days=30)).replace(tzinfo=None)
+        since = datetime.now(UTC) - timedelta(days=30)
         trend_counts: dict[str, int] = {}
         for session in completed:
-            if session.completed_at and session.completed_at >= since:
-                day = session.completed_at.date().isoformat()
+            completed_at = _as_utc(session.completed_at)
+            if completed_at and completed_at >= since:
+                day = completed_at.date().isoformat()
                 trend_counts[day] = trend_counts.get(day, 0) + 1
         trend_30d = [TrendPoint(date=day, completed=count) for day, count in sorted(trend_counts.items())]
 
