@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -7,7 +9,24 @@ from app.core.config import settings
 from app.core.paths import UPLOADS_DIR
 
 
+def configure_logging() -> None:
+    """Route the app's own loggers to the console.
+
+    Uvicorn only configures its own loggers, so without this every `app.*` INFO line -
+    including the dev-mode OTP code when SMTP is unset - is silently dropped.
+    """
+    app_logger = logging.getLogger("app")
+    if app_logger.handlers:
+        return
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(levelname)s:     [%(name)s] %(message)s"))
+    app_logger.addHandler(handler)
+    app_logger.setLevel(logging.INFO)
+    app_logger.propagate = False
+
+
 def create_app() -> FastAPI:
+    configure_logging()
     app = FastAPI(title=settings.PROJECT_NAME)
 
     app.add_middleware(

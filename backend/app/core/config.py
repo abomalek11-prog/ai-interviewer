@@ -2,7 +2,7 @@ from functools import cached_property
 import json
 import os
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -47,6 +47,13 @@ class Settings(BaseSettings):
     OPENAI_TTS_VOICE: str = "alloy"
     OPENAI_VISION_MODEL: str = "gpt-4o-mini"
 
+    # OpenRouter (OpenAI-compatible gateway). Each model in OPENROUTER_MODELS becomes its own
+    # profile, tried in order, so a rate-limited free model falls through to the next one.
+    # `openrouter/free` is OpenRouter's router over whatever free models are currently live.
+    OPENROUTER_API_KEY: str | None = None
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+    OPENROUTER_MODELS: str = "nvidia/nemotron-3-ultra-550b-a55b:free,nvidia/nemotron-3-super-120b-a12b:free,openrouter/free"
+
     OTP_EXPIRE_MINUTES: int = 10
     OTP_MAX_ATTEMPTS: int = 5
 
@@ -55,6 +62,13 @@ class Settings(BaseSettings):
     SMTP_USERNAME: str | None = None
     SMTP_PASSWORD: str | None = None
     SMTP_FROM_EMAIL: str = "no-reply@interviewai.app"
+
+    @model_validator(mode="after")
+    def _require_real_secret_in_production(self) -> "Settings":
+        # Anyone who knows the default key can mint valid login tokens for any user.
+        if self.ENVIRONMENT == "production" and self.SECRET_KEY == "change-me":
+            raise ValueError("SECRET_KEY must be set to a long random value when ENVIRONMENT=production")
+        return self
 
     @cached_property
     def cors_origins(self) -> list[str]:
@@ -69,18 +83,27 @@ class Settings(BaseSettings):
         """
         profiles: list[dict[str, str | None]] = []
 
+        def vision_model_for(model: str, base_url: str | None) -> str:
+            # OPENAI_VISION_MODEL names an OpenAI model, so it only applies on OpenAI's own
+            # endpoint; on any other gateway the profile's model handles the snapshots too.
+            if not base_url or "openai.com" in base_url:
+                return self.OPENAI_VISION_MODEL
+            return model
+
         if self.AI_MODEL_PROFILES.strip():
             try:
                 raw_profiles = json.loads(self.AI_MODEL_PROFILES)
                 for item in raw_profiles:
                     api_key = item.get("api_key") or os.getenv(item.get("api_key_env", ""))
+                    base_url = item.get("base_url") or self.OPENAI_BASE_URL
                     profiles.append(
                         {
                             "id": item["id"],
                             "label": item.get("label") or item["id"],
                             "model": item["model"],
+                            "vision_model": item.get("vision_model") or vision_model_for(item["model"], base_url),
                             "api_key": api_key,
-                            "base_url": item.get("base_url") or self.OPENAI_BASE_URL,
+                            "base_url": base_url,
                         }
                     )
             except json.JSONDecodeError:
@@ -94,6 +117,7 @@ class Settings(BaseSettings):
                             "id": profile_id,
                             "label": label or profile_id,
                             "model": model,
+                            "vision_model": vision_model_for(model, self.OPENAI_BASE_URL),
                             "api_key": os.getenv(api_key_env),
                             "base_url": self.OPENAI_BASE_URL,
                         }
@@ -106,10 +130,31 @@ class Settings(BaseSettings):
                     "id": self.OPENAI_MODEL_PROFILE_ID,
                     "label": "Default OpenAI",
                     "model": self.OPENAI_MODEL,
+                    "vision_model": vision_model_for(self.OPENAI_MODEL, self.OPENAI_BASE_URL),
                     "api_key": self.OPENAI_API_KEY,
                     "base_url": self.OPENAI_BASE_URL,
                 },
             )
+
+        # Inserted ahead of OpenAI: when an OpenRouter key is present it is the intended
+        # (free) provider, and OpenAI only serves as the paid fallback behind it.
+        if self.OPENROUTER_API_KEY:
+            models = [m.strip() for m in self.OPENROUTER_MODELS.split(",") if m.strip()]
+            profiles[:0] = [
+                {
+                    "id": f"openrouter:{model}",
+                    "label": (
+                        "OpenRouter - any free model"
+                        if model == "openrouter/free"
+                        else f"OpenRouter - {model.removesuffix(':free')}" + (" (free)" if model.endswith(":free") else "")
+                    ),
+                    "model": model,
+                    "vision_model": model,
+                    "api_key": self.OPENROUTER_API_KEY,
+                    "base_url": self.OPENROUTER_BASE_URL,
+                }
+                for model in models
+            ]
 
         deduped: dict[str, dict[str, str | None]] = {}
         for profile in profiles:

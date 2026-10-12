@@ -95,10 +95,11 @@ export const interviewsApi = {
     apiClient.post<InterviewSession>("/interviews", payload).then((r) => r.data),
   submitAnswer: (sessionId: string, payload: { question_id: string; transcript: string; video_url?: string }) =>
     apiClient.post<InterviewSession>(`/interviews/${sessionId}/answers`, payload).then((r) => r.data),
-  liveWsUrl: (sessionId: string) => {
+  liveWsUrl: (sessionId: string, lang?: string) => {
     const token = tokenStorage.getAccessToken() ?? "";
     const wsBase = API_BASE_URL.replace(/^http/, "ws");
-    return `${wsBase}/interviews/${sessionId}/live?token=${encodeURIComponent(token)}`;
+    const langParam = lang ? `&lang=${encodeURIComponent(lang)}` : "";
+    return `${wsBase}/interviews/${sessionId}/live?token=${encodeURIComponent(token)}${langParam}`;
   },
 };
 

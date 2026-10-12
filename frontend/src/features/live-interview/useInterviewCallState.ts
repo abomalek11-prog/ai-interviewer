@@ -27,6 +27,12 @@ export function useInterviewCallState({ sessionId, speechLang, captureFrame, vad
   const [micRetryKey, setMicRetryKey] = useState(0);
   const mic = useMicStream(true, micRetryKey);
 
+  // Declared before useReducer: React replays queued actions through the reducer at the
+  // useReducer call site, so the closure below must not read a binding declared further
+  // down this function. The placeholders are only ever live on the first render, before
+  // anything can have dispatched; every later render reuses the previous render's deps.
+  const depsRef = useRef<TransitionDeps>({ stopAiPlayback: () => {}, submitTurn: () => {} });
+
   const [state, dispatchRaw] = useReducer(
     (s: typeof initialInterviewCallState, event: CallEvent) => transition(s, event, depsRef.current),
     initialInterviewCallState,
@@ -48,19 +54,36 @@ export function useInterviewCallState({ sessionId, speechLang, captureFrame, vad
     onEnded: () => dispatch({ type: "ai_audio_ended" }),
   });
 
-  const socket = useLiveInterviewSocket(sessionId, {
-    onAiText: (text) => {
-      lastAiTextRef.current = text;
-      dispatch({ type: "ai_text", text });
+  const socket = useLiveInterviewSocket(
+    sessionId,
+    {
+      onAiText: (text) => {
+        lastAiTextRef.current = text;
+        dispatch({ type: "ai_text", text });
+      },
+      onAiAudio: (bytes) => player.playAudioBytes(bytes, lastAiTextRef.current),
+      onTranscript: (text) => dispatch({ type: "transcript", text }),
+      onSummary: (overallScore) => dispatch({ type: "summary", overallScore }),
+      onNotice: (message) => dispatch({ type: "notice", message }),
+      onError: (message) => dispatch({ type: "socket_error", message }),
+      onOpen: () => {},
+      onClose: () => dispatch({ type: "socket_closed" }),
     },
-    onAiAudio: (bytes) => player.playAudioBytes(bytes, lastAiTextRef.current),
-    onTranscript: (text) => dispatch({ type: "transcript", text }),
-    onSummary: (overallScore) => dispatch({ type: "summary", overallScore }),
-    onNotice: (message) => dispatch({ type: "notice", message }),
-    onError: (message) => dispatch({ type: "socket_error", message }),
-    onOpen: () => {},
-    onClose: () => dispatch({ type: "socket_closed" }),
-  });
+    speechLang,
+  );
+
+  // The handshake carries the starting language; this keeps the AI in step when the
+  // candidate switches language mid-interview, without dropping the connection.
+  // Keyed off the language alone - `socket` is a fresh object every render, so depending
+  // on it here would re-send on every re-render.
+  const sentLangRef = useRef(speechLang);
+  const sendLanguageRef = useRef(socket.sendLanguage);
+  sendLanguageRef.current = socket.sendLanguage;
+  useEffect(() => {
+    if (sentLangRef.current === speechLang) return;
+    sentLangRef.current = speechLang;
+    sendLanguageRef.current(speechLang);
+  }, [speechLang]);
 
   const submitTurn = useCallback<TransitionDeps["submitTurn"]>(
     (input) => {
@@ -75,7 +98,6 @@ export function useInterviewCallState({ sessionId, speechLang, captureFrame, vad
     [socket],
   );
 
-  const depsRef = useRef<TransitionDeps>({ stopAiPlayback: player.stop, submitTurn });
   depsRef.current = { stopAiPlayback: player.stop, submitTurn };
 
   // Candidate audio capture: a plain MediaRecorder over the mic's audio track, started/stopped

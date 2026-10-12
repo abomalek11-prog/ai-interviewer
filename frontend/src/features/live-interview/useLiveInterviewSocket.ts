@@ -18,16 +18,24 @@ interface LiveInterviewSocketCallbacks {
  * format. Knows nothing about VAD, playback, or call state; just parses frames and
  * exposes typed send helpers.
  */
-export function useLiveInterviewSocket(sessionId: string | undefined, callbacks: LiveInterviewSocketCallbacks) {
+export function useLiveInterviewSocket(
+  sessionId: string | undefined,
+  callbacks: LiveInterviewSocketCallbacks,
+  lang?: string,
+) {
   const wsRef = useRef<WebSocket | null>(null);
   const callbacksRef = useRef(callbacks);
   callbacksRef.current = callbacks;
+  // Read through a ref: the language belongs to the handshake (so the opening greeting is
+  // already in it), and a later change must not tear down a live interview to reconnect.
+  const langRef = useRef(lang);
+  langRef.current = lang;
 
   useEffect(() => {
     if (!sessionId) return;
     let cancelled = false;
 
-    const ws = new WebSocket(interviewsApi.liveWsUrl(sessionId));
+    const ws = new WebSocket(interviewsApi.liveWsUrl(sessionId, langRef.current));
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
 
@@ -100,6 +108,11 @@ export function useLiveInterviewSocket(sessionId: string | undefined, callbacks:
     if (ws?.readyState === WebSocket.OPEN) ws.send(bytes as BufferSource);
   }, []);
 
+  const sendLanguage = useCallback((value: string) => {
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "lang", value }));
+  }, []);
+
   const sendEnd = useCallback(() => {
     const ws = wsRef.current;
     if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "end" }));
@@ -107,5 +120,5 @@ export function useLiveInterviewSocket(sessionId: string | undefined, callbacks:
 
   const isOpen = useCallback(() => wsRef.current?.readyState === WebSocket.OPEN, []);
 
-  return { sendFrame, sendUserText, sendAudio, sendEnd, isOpen };
+  return { sendFrame, sendUserText, sendAudio, sendEnd, sendLanguage, isOpen };
 }

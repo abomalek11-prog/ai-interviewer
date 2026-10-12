@@ -38,6 +38,9 @@ class InterviewSession(Base):
     conversation_messages: Mapped[list["ConversationMessage"]] = relationship(
         back_populates="session", cascade="all, delete-orphan", order_by="ConversationMessage.created_at"
     )
+    evaluation: Mapped["SessionEvaluation | None"] = relationship(
+        back_populates="session", cascade="all, delete-orphan", uselist=False
+    )
 
 
 class Question(Base):
@@ -84,6 +87,35 @@ class Evaluation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     answer: Mapped["Answer"] = relationship(back_populates="evaluation")
+
+
+class SessionEvaluation(Base):
+    """Whole-interview assessment of a live conversation.
+
+    Live interviews have no fixed Question/Answer rows to hang an Evaluation on, so the
+    final assessment lives here, one per session. `score` is the stored overall score
+    (rubric-weighted, same value as InterviewSession.overall_score).
+    """
+
+    __tablename__ = "session_evaluations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    session_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("interview_sessions.id", ondelete="CASCADE"), nullable=False, unique=True, index=True
+    )
+    score: Mapped[int] = mapped_column(Integer, nullable=False)
+    correctness: Mapped[int] = mapped_column(Integer, nullable=False)
+    depth: Mapped[int] = mapped_column(Integer, nullable=False)
+    clarity: Mapped[int] = mapped_column(Integer, nullable=False)
+    terminology: Mapped[int] = mapped_column(Integer, nullable=False)
+    feedback: Mapped[str] = mapped_column(Text, nullable=False)
+    strengths: Mapped[list[str]] = mapped_column(JSON, default=list)
+    improvements: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # [{"topic": str, "score": int, "comment": str}] - one entry per question actually discussed.
+    question_breakdown: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    session: Mapped["InterviewSession"] = relationship(back_populates="evaluation")
 
 
 class ConversationMessage(Base):

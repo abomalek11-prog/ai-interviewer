@@ -4,13 +4,61 @@ import re
 from abc import ABC, abstractmethod
 from typing import Any
 
-from openai import APIConnectionError, APIError, APITimeoutError, OpenAI, RateLimitError
+from openai import (
+    APIConnectionError,
+    APIError,
+    APITimeoutError,
+    BadRequestError,
+    NotFoundError,
+    OpenAI,
+    RateLimitError,
+)
 from pydantic import ValidationError
 
 from app.core.config import settings
 from app.schemas.ai import AIModelProfileRead, AnswerEvaluation, GeneratedQuestion
 
 logger = logging.getLogger("app.ai")
+
+# Output ceilings. Gateways that meter credits (OpenRouter) reserve the model's full
+# output window when max_tokens is omitted, so an unbounded request fails on a small
+# balance even though the actual reply is a few sentences. Reasoning models spend part
+# of this budget thinking before they answer (~200-300 tokens per turn at low effort on
+# the free Nemotron models), so the ceilings leave room for that on top of the reply.
+MAX_REPLY_TOKENS = 1200  # spoken interview turn: 2-4 sentences + reasoning
+MAX_JSON_TOKENS = 3000   # evaluation / generated question set + reasoning
+
+# Sent to OpenRouter only: keep reasoning short (latency in a live conversation) and out
+# of the reply text. Models without reasoning ignore it.
+OPENROUTER_REASONING = {"reasoning": {"effort": "low", "exclude": True}}
+
+# Fail fast so a stalled free model hands over to the next profile instead of hanging
+# the live interview for the SDK's 10-minute default.
+REQUEST_TIMEOUT_SECONDS = 60
+
+
+class EmptyCompletionError(RuntimeError):
+    """The model returned no usable content (e.g. a reasoning model spent the whole budget thinking)."""
+
+
+def parse_json_content(content: str) -> dict[str, Any] | list[Any]:
+    """Parse a model's JSON reply, tolerating the wrappers models without strict JSON mode add.
+
+    Free models often ignore response_format and wrap the object in a ```json fence or a
+    sentence of preamble; the payload itself is still usable.
+    """
+    text = content.strip()
+    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = min((i for i in (text.find("{"), text.find("[")) if i != -1), default=-1)
+        end = max(text.rfind("}"), text.rfind("]"))
+        if start == -1 or end <= start:
+            raise
+        return json.loads(text[start : end + 1])
 
 
 class BaseLLMProvider(ABC):
@@ -28,31 +76,65 @@ class BaseLLMProvider(ABC):
 
 
 class OpenAIProvider(BaseLLMProvider):
-    def __init__(self, api_key: str, model: str, base_url: str | None = None):
-        self.client = OpenAI(api_key=api_key, base_url=base_url or None)
+    # Models that rejected an image in this process. Remembered so later turns skip the
+    # snapshot up front instead of spending a second request (against a 50/day free quota)
+    # on the text-only retry every time.
+    _text_only_models: set[str] = set()
+
+    def __init__(self, api_key: str, model: str, base_url: str | None = None, vision_model: str | None = None):
+        # OpenRouter asks callers to identify the app; it is optional and harmless elsewhere.
+        headers = (
+            {"HTTP-Referer": settings.FRONTEND_BASE_URL, "X-Title": settings.PROJECT_NAME}
+            if base_url and "openrouter.ai" in base_url
+            else None
+        )
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url=base_url or None,
+            default_headers=headers,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+            max_retries=1,
+        )
         self.model = model
+        self.vision_model = vision_model or settings.OPENAI_VISION_MODEL
         self.supports_audio = not base_url or "openai.com" in base_url
+        self.extra_body = OPENROUTER_REASONING if base_url and "openrouter.ai" in base_url else None
 
     def complete_json(self, system_prompt: str, user_prompt: str) -> dict[str, Any] | list[Any]:
         response = self.client.chat.completions.create(
             model=self.model,
             temperature=0.2,
+            max_tokens=MAX_JSON_TOKENS,
             response_format={"type": "json_object"},
+            extra_body=self.extra_body,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
         )
-        content = response.choices[0].message.content or "{}"
-        return json.loads(content)
+        content = response.choices[0].message.content
+        if not content or not content.strip():
+            raise EmptyCompletionError(f"{self.model} returned an empty JSON completion")
+        return parse_json_content(content)
 
-    def transcribe(self, audio_bytes: bytes, filename: str) -> str:
-        result = self.client.audio.transcriptions.create(model="whisper-1", file=(filename, audio_bytes))
+    def transcribe(self, audio_bytes: bytes, filename: str, language: str | None = None) -> str:
+        # Without the hint Whisper guesses the language per utterance and often mis-detects
+        # short Arabic answers as English, returning transliterated nonsense.
+        extra = {"language": language} if language else {}
+        result = self.client.audio.transcriptions.create(
+            model="whisper-1", file=(filename, audio_bytes), **extra
+        )
         return result.text
 
     def converse(self, messages: list[dict[str, Any]], image_data_url: str | None) -> str:
         chat_messages = list(messages)
-        if image_data_url and chat_messages and chat_messages[-1]["role"] == "user":
+        attached_image = bool(
+            image_data_url
+            and chat_messages
+            and chat_messages[-1]["role"] == "user"
+            and self.vision_model not in self._text_only_models
+        )
+        if attached_image:
             last = chat_messages[-1]
             chat_messages[-1] = {
                 "role": "user",
@@ -61,12 +143,26 @@ class OpenAIProvider(BaseLLMProvider):
                     {"type": "image_url", "image_url": {"url": image_data_url}},
                 ],
             }
-        response = self.client.chat.completions.create(
-            model=settings.OPENAI_VISION_MODEL,
-            temperature=0.6,
-            messages=chat_messages,
-        )
-        return response.choices[0].message.content or ""
+        try:
+            response = self.client.chat.completions.create(
+                model=self.vision_model,
+                temperature=0.6,
+                max_tokens=MAX_REPLY_TOKENS,
+                extra_body=self.extra_body,
+                messages=chat_messages,
+            )
+        except (BadRequestError, NotFoundError):
+            if not attached_image:
+                raise
+            # A text-only model rejects the snapshot. Losing the picture is far better than
+            # losing the turn, so answer from the words alone.
+            logger.warning("Model %s rejected the image input; retrying the turn text-only", self.vision_model)
+            self._text_only_models.add(self.vision_model)
+            return self.converse(messages, None)
+        content = response.choices[0].message.content
+        if not content or not content.strip():
+            raise EmptyCompletionError(f"{self.vision_model} returned an empty reply")
+        return content.strip()
 
     def speak(self, text: str) -> bytes:
         response = self.client.audio.speech.create(
@@ -152,8 +248,8 @@ class MockLLMProvider(BaseLLMProvider):
             "clarity": clarity,
             "terminology": terminology,
             "feedback": (
-                "Offline demo evaluation (no AI key configured): scored from answer length, structure and "
-                "technical vocabulary. Configure an OpenAI API key for a real assessment."
+                "Offline demo evaluation (no AI provider available): scored from answer length, structure and "
+                "technical vocabulary. Configure an OpenRouter or OpenAI API key for a real assessment."
             ),
             "strengths": (["Uses relevant technical vocabulary"] if marker_hits >= 3 else [])
             + (["Substantive, detailed answer"] if word_count >= 80 else []),
@@ -179,14 +275,34 @@ class MockLLMProvider(BaseLLMProvider):
 
         return user_prompt.strip()
 
+    # Canned demo dialogue. This provider cannot understand an answer, so it must not
+    # pretend to: it says so out loud rather than silently marching through questions.
+    _DEMO_SCRIPT = {
+        "Arabic": (
+            "[وضع تجريبي - لا يوجد مزوّد ذكاء اصطناعي فعّال (مفتاح مفقود أو رصيد منتهٍ)، "
+            "لذلك هذا الردّ آلي ولا يفهم إجابتك]",
+            "مرحبًا بك، شكرًا لانضمامك! لنبدأ: حدّثني عن خلفيتك المهنية وما الذي جذبك إلى هذا الدور؟",
+            "سؤال رقم {n}: اشرح لي تحديًا تقنيًا واجهته، وكيف قايضت بين الحلول المتاحة؟",
+        ),
+        "English": (
+            "[Demo mode - no working AI provider (missing key or exhausted credits), "
+            "so this reply is canned and cannot understand your answer]",
+            "Hi, thanks for joining! To start, could you walk me through your background and what drew you to this role?",
+            "Question #{n}: describe a technical challenge you faced and the trade-offs you weighed.",
+        ),
+    }
+
+    @staticmethod
+    def _demo_language(messages: list[dict[str, Any]]) -> str:
+        system = next((str(m.get("content", "")) for m in messages if m.get("role") == "system"), "")
+        return "Arabic" if "in Arabic" in system else "English"
+
     def converse(self, messages: list[dict[str, Any]], image_data_url: str | None) -> str:
         turn_count = sum(1 for m in messages if m["role"] == "assistant")
+        banner, opening, follow_up = self._DEMO_SCRIPT[self._demo_language(messages)]
         if turn_count == 0:
-            return "Hi, thanks for joining! To start, could you walk me through your background and what drew you to this role?"
-        return (
-            f"Thanks for that answer. Here's follow-up question #{turn_count + 1}: "
-            "could you go a bit deeper into the trade-offs of the approach you just described?"
-        )
+            return f"{banner} {opening}"
+        return f"{banner} {follow_up.format(n=turn_count + 1)}"
 
     def speak(self, text: str) -> bytes:
         return b""
@@ -237,6 +353,7 @@ class AIService:
             api_key=str(profile["api_key"]),
             model=str(profile["model"]),
             base_url=profile.get("base_url"),
+            vision_model=profile.get("vision_model"),
         )
 
     def _complete_json_with_fallback(self, system_prompt: str, user_prompt: str) -> dict[str, Any] | list[Any]:
@@ -252,7 +369,15 @@ class AIService:
             try:
                 provider = self._build_provider(profile)
                 return provider.complete_json(system_prompt, user_prompt)
-            except (RateLimitError, APITimeoutError, APIConnectionError, APIError, json.JSONDecodeError, ValidationError) as exc:
+            except (
+                RateLimitError,
+                APITimeoutError,
+                APIConnectionError,
+                APIError,
+                EmptyCompletionError,
+                json.JSONDecodeError,
+                ValidationError,
+            ) as exc:
                 last_error = exc
                 logger.warning(
                     "AI profile failed; trying fallback if available. profile_id=%s model=%s error=%s",
@@ -272,11 +397,11 @@ class AIService:
             raise last_error
         return MockLLMProvider().complete_json(system_prompt, user_prompt)
 
-    def transcribe_audio(self, audio_bytes: bytes, filename: str) -> str:
+    def transcribe_audio(self, audio_bytes: bytes, filename: str, language: str | None = None) -> str:
         if self.provider is not None:
             if isinstance(self.provider, OpenAIProvider) and self.provider.supports_audio:
                 try:
-                    return self.provider.transcribe(audio_bytes, filename)
+                    return self.provider.transcribe(audio_bytes, filename, language)
                 except Exception as exc:
                     raise RuntimeError("Voice transcription failed") from exc
             raise RuntimeError("Voice transcription is unavailable for the configured AI provider")
@@ -291,7 +416,7 @@ class AIService:
         for profile in profiles:
             try:
                 provider = self._build_provider(profile)
-                return provider.transcribe(audio_bytes, filename)
+                return provider.transcribe(audio_bytes, filename, language)
             except (RateLimitError, APITimeoutError, APIConnectionError, APIError) as exc:
                 last_error = exc
                 logger.warning(
@@ -315,7 +440,7 @@ class AIService:
             try:
                 provider = self._build_provider(profile)
                 return provider.converse(messages, image_data_url)
-            except (RateLimitError, APITimeoutError, APIConnectionError, APIError) as exc:
+            except (RateLimitError, APITimeoutError, APIConnectionError, APIError, EmptyCompletionError) as exc:
                 last_error = exc
                 logger.warning(
                     "AI profile failed conversation turn; trying fallback if available. profile_id=%s error=%s",
@@ -381,7 +506,12 @@ class AIService:
             f"Candidate answer: {answer}"
         )
         result = self._complete_json_with_fallback(system_prompt, user_prompt)
-        return AnswerEvaluation.model_validate(result)
+        try:
+            return AnswerEvaluation.model_validate(result)
+        except ValidationError:
+            # Valid JSON in the wrong shape - common with free models that ignore the schema.
+            logger.warning("AI evaluation had an unexpected shape; using the offline evaluator")
+            return AnswerEvaluation.model_validate(MockLLMProvider().complete_json(system_prompt, user_prompt))
 
     def generate_questions(
         self,
@@ -401,5 +531,10 @@ class AIService:
             f"Focus areas: {', '.join(focus_areas) if focus_areas else 'general'}"
         )
         result = self._complete_json_with_fallback(system_prompt, user_prompt)
-        questions = result["questions"] if isinstance(result, dict) else result
-        return [GeneratedQuestion.model_validate(item) for item in questions]
+        try:
+            questions = result["questions"] if isinstance(result, dict) else result
+            return [GeneratedQuestion.model_validate(item) for item in questions]
+        except (KeyError, TypeError, ValidationError):
+            logger.warning("AI question set had an unexpected shape; using the offline question set")
+            fallback = MockLLMProvider().complete_json(system_prompt, user_prompt)
+            return [GeneratedQuestion.model_validate(item) for item in fallback["questions"]]

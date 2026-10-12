@@ -88,7 +88,9 @@ Key configuration variables in `.env`:
 |---|---|---|
 | `DATABASE_URL` | SQLAlchemy Connection URI | `sqlite:///./dev.db` |
 | `SECRET_KEY` | JWT Secret Key | *Set a long random string* |
-| `OPENAI_API_KEY` | OpenAI API Key for AI interviewers | `""` |
+| `OPENROUTER_API_KEY` | OpenRouter key (free models available); tried before OpenAI | `""` |
+| `OPENROUTER_MODELS` | Comma-separated models, tried in order on rate limits / errors | `nvidia/nemotron-3-ultra-550b-a55b:free,nvidia/nemotron-3-super-120b-a12b:free,openrouter/free` |
+| `OPENAI_API_KEY` | OpenAI API Key (optional fallback; also enables Whisper STT + TTS voice) | `""` |
 | `OPENAI_MODEL` | Default LLM model | `gpt-4.1-mini` |
 | `VITE_API_BASE_URL` | Frontend API Base Endpoint | `http://localhost:8000/api/v1` |
 
@@ -109,6 +111,20 @@ Key configuration variables in `.env`:
 | `GET` | `/api/v1/ai/profiles` | List available AI interviewer profiles |
 | `POST` | `/api/v1/interviews/` | Create a new interview session |
 | `POST` | `/api/v1/interviews/{id}/live` | Live voice/video interaction endpoint |
+
+---
+
+## 🧪 Tests
+
+```bash
+cd backend && pip install -r requirements-dev.txt && pytest
+cd frontend && npm test
+```
+
+The backend suite runs fully offline (in-memory SQLite, no AI keys).
+
+> **Voice with OpenRouter:** OpenRouter has no speech endpoints, so the live interview uses the
+> browser's own speech recognition and speech synthesis - use Chrome or Edge.
 
 ---
 

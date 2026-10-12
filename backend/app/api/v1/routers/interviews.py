@@ -74,7 +74,9 @@ async def live_interview_ws(websocket: WebSocket, session_id: str, db: DbSession
         return
 
     await websocket.accept()
-    live_service = LiveInterviewService(db, session)
+    # Taken from the handshake rather than a later message so the opening greeting is
+    # already spoken in the candidate's language.
+    live_service = LiveInterviewService(db, session, websocket.query_params.get("lang"))
 
     try:
         opening_text = live_service.opening_message()
@@ -96,6 +98,8 @@ async def live_interview_ws(websocket: WebSocket, session_id: str, db: DbSession
 
                 if payload.get("type") == "frame":
                     pending_frame = payload.get("image")
+                elif payload.get("type") == "lang":
+                    live_service.set_language(str(payload.get("value") or ""))
                 elif payload.get("type") == "user_text":
                     turn = live_service.handle_text_turn(str(payload.get("text") or ""), pending_frame)
                     pending_frame = None

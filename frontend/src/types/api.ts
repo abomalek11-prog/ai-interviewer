@@ -103,6 +103,25 @@ export interface ConversationMessage {
   created_at: string;
 }
 
+export interface QuestionInsight {
+  topic: string;
+  score: number;
+  comment: string;
+}
+
+/** Whole-interview assessment of a live conversation (structured interviews score per answer instead). */
+export interface SessionEvaluation {
+  score: number;
+  correctness: number;
+  depth: number;
+  clarity: number;
+  terminology: number;
+  feedback: string;
+  strengths: string[];
+  improvements: string[];
+  question_breakdown: QuestionInsight[];
+}
+
 export interface InterviewSession {
   id: string;
   job_id: string;
@@ -118,6 +137,7 @@ export interface InterviewSession {
   created_at: string;
   questions: Question[];
   conversation_messages: ConversationMessage[];
+  evaluation: SessionEvaluation | null;
 }
 
 export interface SessionSummary {

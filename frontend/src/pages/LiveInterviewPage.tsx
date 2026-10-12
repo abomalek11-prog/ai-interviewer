@@ -1,4 +1,4 @@
-import { BrainCircuit, CheckCircle2, Ear, Loader2, Mic, MicOff, PhoneOff, Video } from "lucide-react";
+import { BrainCircuit, CheckCircle2, Ear, Loader2, Mic, MicOff, MonitorUp, MonitorX, PhoneOff, Video } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
@@ -8,14 +8,33 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useInterviewCallState } from "@/features/live-interview/useInterviewCallState";
+import { useScreenShare } from "@/features/live-interview/useScreenShare";
 import type { CallState } from "@/features/live-interview/interviewCallReducer";
 import { useAsync } from "@/hooks/useAsync";
 import { cn } from "@/lib/utils";
 
 const SPEECH_LANGS = [
-  { value: "en-US", label: "English" },
   { value: "ar-SA", label: "العربية" },
+  { value: "en-US", label: "English" },
 ] as const;
+
+const DEFAULT_SPEECH_LANG = "ar-SA";
+const SPEECH_LANG_STORAGE_KEY = "interviewai.speechLang";
+
+/** Remembered across sessions so the candidate never has to re-pick their language. */
+function loadSpeechLang(): string {
+  try {
+    const saved = window.localStorage.getItem(SPEECH_LANG_STORAGE_KEY);
+    if (saved && SPEECH_LANGS.some((option) => option.value === saved)) return saved;
+  } catch {
+    // Storage can be unavailable (private mode, blocked cookies) - fall back to the default.
+  }
+  return DEFAULT_SPEECH_LANG;
+}
+
+// Snapshots travel over the websocket as data URLs. A 4K screen at full size is several MB
+// per turn; 1280px wide keeps code legible to the model at a fraction of that.
+const MAX_FRAME_WIDTH = 1280;
 
 const STATE_LABEL: Record<CallState, string> = {
   connecting: "Connecting...",
@@ -32,20 +51,26 @@ export function LiveInterviewPage() {
   const navigate = useNavigate();
   const { data: session, isLoading, error } = useAsync(() => interviewsApi.get(sessionId!), [sessionId]);
 
-  const [speechLang, setSpeechLang] = useState<string>("en-US");
+  const [speechLang, setSpeechLang] = useState<string>(loadSpeechLang);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const screenVideoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const screenShare = useScreenShare();
 
   const captureFrame = (): string | null => {
-    const video = videoRef.current;
+    // A shared screen is what the candidate wants the interviewer to look at, so it wins.
+    const sharing = Boolean(screenShare.stream);
+    const video = sharing ? screenVideoRef.current : videoRef.current;
     const canvas = canvasRef.current;
     if (!video || !canvas || video.videoWidth === 0) return null;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    const scale = Math.min(1, MAX_FRAME_WIDTH / video.videoWidth);
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
     const ctx = canvas.getContext("2d");
     if (!ctx) return null;
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL("image/jpeg", 0.7);
+    // Higher quality for the screen: JPEG artifacts around small code glyphs hurt legibility.
+    return canvas.toDataURL("image/jpeg", sharing ? 0.85 : 0.7);
   };
 
   const { state, liveText, stream, manualModeAvailable, beginTurn, endTurn, endInterview, retryMic, speechRecognitionSupported } =
@@ -54,6 +79,16 @@ export function LiveInterviewPage() {
   useEffect(() => {
     if (videoRef.current) videoRef.current.srcObject = stream;
   }, [stream]);
+
+  useEffect(() => {
+    if (screenVideoRef.current) screenVideoRef.current.srcObject = screenShare.stream;
+  }, [screenShare.stream]);
+
+  // Don't leave the screen being captured after the interview is over.
+  const { stop: stopScreenShare } = screenShare;
+  useEffect(() => {
+    if (state.call === "ended") stopScreenShare();
+  }, [state.call, stopScreenShare]);
 
   if (isLoading) {
     return <Skeleton className="h-96 w-full" />;
@@ -78,6 +113,7 @@ export function LiveInterviewPage() {
       </section>
 
       {connectionError && <p className="mb-4 text-sm text-destructive">{connectionError}</p>}
+      {screenShare.error && <p className="mb-4 text-sm text-destructive">{screenShare.error}</p>}
       {notice && <p className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">{notice}</p>}
 
       {call === "mic_error" ? (
@@ -106,6 +142,21 @@ export function LiveInterviewPage() {
             <Card className="relative grid aspect-video place-items-center overflow-hidden bg-secondary text-white">
               <video ref={videoRef} autoPlay muted playsInline className="h-full w-full object-cover" />
               <canvas ref={canvasRef} className="hidden" />
+              <video
+                ref={screenVideoRef}
+                autoPlay
+                muted
+                playsInline
+                className={cn(
+                  "absolute right-3 bottom-3 w-1/3 rounded-md border-2 border-white/70 bg-black object-contain shadow-lg",
+                  !screenShare.stream && "hidden",
+                )}
+              />
+              {screenShare.stream && (
+                <div className="absolute top-3 right-3 flex items-center gap-1.5 rounded-full bg-sky-600/85 px-3 py-1 text-xs">
+                  <MonitorUp size={14} /> Interviewer can see your screen
+                </div>
+              )}
 
               {call === "ai_speaking" && (
                 <div className="absolute top-3 left-3 flex items-center gap-1.5 rounded-full bg-black/60 px-3 py-1 text-xs">
@@ -152,13 +203,30 @@ export function LiveInterviewPage() {
                   <Ear size={16} /> Just talk naturally - no need to press anything.
                 </p>
               )}
+              {screenShare.supported && (
+                <Button
+                  variant="outline"
+                  onClick={screenShare.stream ? screenShare.stop : () => void screenShare.start()}
+                  className="w-fit"
+                >
+                  {screenShare.stream ? <MonitorX size={18} /> : <MonitorUp size={18} />}
+                  {screenShare.stream ? "Stop sharing" : "Share screen"}
+                </Button>
+              )}
               <Button variant="outline" onClick={endInterview} className="w-fit">
                 <PhoneOff size={18} /> End interview
               </Button>
               {speechRecognitionSupported && (
                 <select
                   value={speechLang}
-                  onChange={(e) => setSpeechLang(e.target.value)}
+                  onChange={(e) => {
+                    setSpeechLang(e.target.value);
+                    try {
+                      window.localStorage.setItem(SPEECH_LANG_STORAGE_KEY, e.target.value);
+                    } catch {
+                      // Non-fatal: the choice just won't survive a reload.
+                    }
+                  }}
                   disabled={call === "candidate_speaking"}
                   className="h-9 rounded-md border border-border bg-background px-2 text-sm"
                   aria-label="Speech language"

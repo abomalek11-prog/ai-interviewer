@@ -66,6 +66,26 @@ class ConversationMessageRead(BaseModel):
     created_at: datetime
 
 
+class QuestionInsight(BaseModel):
+    topic: str
+    score: int
+    comment: str
+
+
+class SessionEvaluationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    score: int
+    correctness: int
+    depth: int
+    clarity: int
+    terminology: int
+    feedback: str
+    strengths: list[str]
+    improvements: list[str]
+    question_breakdown: list[QuestionInsight]
+
+
 class SessionRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -83,6 +103,7 @@ class SessionRead(BaseModel):
     created_at: datetime
     questions: list[QuestionWithAnswer] = Field(default_factory=list)
     conversation_messages: list[ConversationMessageRead] = Field(default_factory=list)
+    evaluation: SessionEvaluationRead | None = None
 
 
 class SessionSummary(BaseModel):

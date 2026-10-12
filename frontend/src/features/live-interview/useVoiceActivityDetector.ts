@@ -5,6 +5,10 @@ import { useEffect, useRef, useState } from "react";
 // pause briefly mid-sentence without the turn being cut off.
 import { MicVAD } from "@ricky0123/vad-web";
 
+// Keep in step with package.json: @ricky0123/vad-web 0.0.24 ships with onnxruntime-web 1.14.0.
+const VAD_ASSET_PATH = "https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.24/dist/";
+const ONNX_WASM_PATH = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/";
+
 export interface VadThresholds {
   /** Frame-level probability above which audio is considered speech (0-1). Higher = less sensitive to noise. */
   positiveSpeechThreshold: number;
@@ -19,8 +23,12 @@ export interface VadThresholds {
 export const DEFAULT_VAD_THRESHOLDS: VadThresholds = {
   positiveSpeechThreshold: 0.6,
   negativeSpeechThreshold: 0.45,
-  minSpeechFrames: 3,
-  redemptionFrames: 24, // ~768ms at the model's 32ms frame size - tolerates a mid-sentence breath/pause
+  // ~320ms at the model's 32ms frame size. Three frames (~96ms) let a cough, a chair
+  // creak or a one-word "aha" open a turn, which the backend then had to treat as an answer.
+  minSpeechFrames: 10,
+  // ~1.9s. People pause well past 768ms while thinking mid-answer, and the old value cut
+  // them off and submitted the half-sentence as their answer.
+  redemptionFrames: 60,
 };
 
 export type VadStatus = "idle" | "loading" | "ready" | "error";
@@ -58,6 +66,10 @@ export function useVoiceActivityDetector({ enabled, thresholds, onSpeechStart, o
     const merged = { ...DEFAULT_VAD_THRESHOLDS, ...thresholds };
 
     MicVAD.new({
+      // Pinned to the installed versions. The library's default points at vad-web@latest
+      // on the CDN, so a new upstream release could silently mismatch this bundle's code.
+      baseAssetPath: VAD_ASSET_PATH,
+      onnxWASMBasePath: ONNX_WASM_PATH,
       positiveSpeechThreshold: merged.positiveSpeechThreshold,
       negativeSpeechThreshold: merged.negativeSpeechThreshold,
       minSpeechFrames: merged.minSpeechFrames,
