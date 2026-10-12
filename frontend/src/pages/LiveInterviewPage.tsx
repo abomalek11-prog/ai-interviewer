@@ -212,7 +212,7 @@ export function LiveInterviewPage() {
             )}
 
             <div className="flex flex-wrap items-center gap-3">
-              {manualModeAvailable ? (
+              {manualModeAvailable && (
                 <Button
                   variant={call === "candidate_speaking" ? "dark" : "outline"}
                   disabled={call !== "listening" && call !== "candidate_speaking" && call !== "ai_speaking"}
@@ -222,10 +222,6 @@ export function LiveInterviewPage() {
                   {call === "candidate_speaking" ? <Mic size={18} className="animate-pulse" /> : <Mic size={18} />}
                   {call === "candidate_speaking" ? "Tap to stop" : "Tap to speak"}
                 </Button>
-              ) : (
-                <p className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm text-muted-foreground">
-                  <Ear size={16} /> Just talk naturally - no need to press anything.
-                </p>
               )}
               {call === "ai_speaking" && (
                 <Button variant="dark" onClick={skipAiSpeech} className="w-fit">
