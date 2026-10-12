@@ -34,13 +34,20 @@ export function splitForSpeech(text: string, maxLength = 180): string[] {
   return chunks;
 }
 
-/** Best installed voice for a BCP-47 tag: exact match (ar-SA), then same language (ar-*). */
+// Neural voices ("Microsoft Hamed Online (Natural)" in Edge, "Google ..." in Chrome) sound
+// far better than the legacy OS voices such as "Microsoft Naayf", which are robotic.
+const NATURAL_VOICE = /natural|neural|online|google/i;
+
+/**
+ * Best voice for a BCP-47 tag. Language fit first (exact locale, then same language in
+ * another locale), and within each a neural voice beats a legacy one - a natural ar-EG
+ * voice is preferred over a robotic ar-SA one.
+ */
 export function pickVoice(voices: SpeechSynthesisVoice[], lang: string): SpeechSynthesisVoice | null {
   const wanted = lang.toLowerCase();
   const base = wanted.split("-")[0];
-  return (
-    voices.find((v) => v.lang.toLowerCase() === wanted) ??
-    voices.find((v) => v.lang.toLowerCase().split(/[-_]/)[0] === base) ??
-    null
-  );
+  const exact = voices.filter((v) => v.lang.toLowerCase().replace("_", "-") === wanted);
+  const sameLanguage = voices.filter((v) => v.lang.toLowerCase().split(/[-_]/)[0] === base);
+  const natural = (list: SpeechSynthesisVoice[]) => list.find((v) => NATURAL_VOICE.test(v.name));
+  return natural(exact) ?? natural(sameLanguage) ?? exact[0] ?? sameLanguage[0] ?? null;
 }

@@ -26,11 +26,11 @@ import { useAsync } from "@/hooks/useAsync";
 import { cn } from "@/lib/utils";
 
 const SPEECH_LANGS = [
-  { value: "ar-SA", label: "العربية" },
   { value: "en-US", label: "English" },
+  { value: "ar-SA", label: "العربية" },
 ] as const;
 
-const DEFAULT_SPEECH_LANG = "ar-SA";
+const DEFAULT_SPEECH_LANG = "en-US";
 const SPEECH_LANG_STORAGE_KEY = "interviewai.speechLang";
 
 /** Remembered across sessions so the candidate never has to re-pick their language. */

@@ -37,6 +37,16 @@ describe("pickVoice", () => {
     expect(pickVoice(voices, "ar-JO")?.name).toBe("Naayf");
   });
 
+  it("prefers a natural voice over a legacy one, even from another locale", () => {
+    const withNatural = [
+      voice("Microsoft Naayf - Arabic (Saudi)", "ar-SA"),
+      voice("Microsoft Hamed Online (Natural) - Arabic (Saudi Arabia)", "ar-SA"),
+      voice("Microsoft Salma Online (Natural) - Arabic (Egypt)", "ar-EG"),
+    ];
+    expect(pickVoice(withNatural, "ar-SA")?.name).toContain("Hamed");
+    expect(pickVoice([withNatural[0], withNatural[2]], "ar-SA")?.name).toContain("Salma");
+  });
+
   it("returns null when the language has no voice", () => {
     expect(pickVoice(voices, "fr-FR")).toBeNull();
   });
