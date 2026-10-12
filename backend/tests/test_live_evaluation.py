@@ -1,4 +1,65 @@
-from app.services.live_interview_service import LiveInterviewService, _as_breakdown, _as_string_list
+from types import SimpleNamespace
+
+from app.services.live_interview_service import (
+    MAX_CAMERA_FRAMES,
+    LiveInterviewService,
+    _as_breakdown,
+    _as_string_list,
+)
+
+
+def _service_without_db() -> LiveInterviewService:
+    session = SimpleNamespace(ai_model_profile_id=None)
+    return LiveInterviewService(db=None, session=session, language_tag="en-US")
+
+
+def test_camera_frames_stay_bounded_and_spread_over_the_interview():
+    service = _service_without_db()
+    for i in range(30):  # a 15-minute interview at one snapshot every 30s
+        service.add_camera_frame(f"data:image/jpeg;base64,{i}")
+    kept = [int(frame.rsplit(",", 1)[1]) for frame in service.camera_frames]
+    assert len(kept) <= MAX_CAMERA_FRAMES
+    assert kept[0] == 0  # the start of the interview is still represented
+    assert kept[-1] >= 16  # ...and so is the second half, not just the opening minutes
+    assert kept == sorted(kept)
+
+
+def test_camera_frames_reject_anything_but_image_data_urls():
+    service = _service_without_db()
+    service.add_camera_frame("https://example.com/tracker.png")
+    service.add_camera_frame("javascript:alert(1)")
+    assert service.camera_frames == []
+
+
+def test_presence_analysis_is_normalized(monkeypatch):
+    service = _service_without_db()
+    service.add_camera_frame("data:image/jpeg;base64,AAAA")
+    seen = {}
+
+    def fake_analyze(system_prompt, user_prompt, images):
+        seen.update(system=system_prompt, images=images)
+        return {"summary": " Mostly looking at the screen. ", "observations": "- Upright posture\n- Good lighting", "flags": []}
+
+    monkeypatch.setattr(service.ai_service, "analyze_images_json", fake_analyze)
+    presence = service._analyze_presence()
+
+    assert presence == {
+        "summary": "Mostly looking at the screen.",
+        "observations": ["Upright posture", "Good lighting"],
+        "flags": [],
+        "frames_analyzed": 1,
+    }
+    # Guardrails are part of the request, not an afterthought.
+    assert "do not infer emotions" in seen["system"]
+    assert "ethnicity" in seen["system"]
+
+
+def test_no_presence_section_without_snapshots_or_a_vision_model(monkeypatch):
+    service = _service_without_db()
+    assert service._analyze_presence() is None  # camera never sent anything
+    service.add_camera_frame("data:image/jpeg;base64,AAAA")
+    monkeypatch.setattr(service.ai_service, "analyze_images_json", lambda *a: None)
+    assert service._analyze_presence() is None  # nothing invented when no model could look
 
 
 def test_string_list_passes_lists_through():

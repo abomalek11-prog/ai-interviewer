@@ -11,6 +11,29 @@ function state(overrides: Partial<InterviewCallState>): InterviewCallState {
   return { ...initialInterviewCallState, ...overrides };
 }
 
+describe("ending the interview", () => {
+  it("silences the AI and shows the report wait instead of looking frozen", () => {
+    const deps = makeDeps();
+    let s = transition(state({ call: "ai_speaking" }), { type: "end_requested" }, deps);
+    expect(s.call).toBe("finishing");
+    expect(deps.stopAiPlayback).toHaveBeenCalledTimes(1);
+
+    // Nothing the mic picks up during the wait starts a new turn.
+    s = transition(s, { type: "speech_start" }, deps);
+    expect(s.call).toBe("finishing");
+
+    s = transition(s, { type: "summary", overallScore: 72 }, deps);
+    expect(s).toMatchObject({ call: "ended", overallScore: 72 });
+  });
+
+  it("ignores a second end request and requests after the end", () => {
+    const deps = makeDeps();
+    expect(transition(state({ call: "finishing" }), { type: "end_requested" }, deps).call).toBe("finishing");
+    expect(transition(state({ call: "ended" }), { type: "end_requested" }, deps).call).toBe("ended");
+    expect(deps.stopAiPlayback).not.toHaveBeenCalled();
+  });
+});
+
 describe("interview call transitions", () => {
   it("runs a normal turn: listening -> speech_start -> speech_end -> processing -> ai reply -> listening", () => {
     const deps = makeDeps();

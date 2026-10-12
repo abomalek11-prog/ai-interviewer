@@ -123,6 +123,9 @@ def test_live_interview_websocket_round_trip(client, auth_headers, candidate):
         assert "مرحب" in opening["text"]  # greeting already in the handshake language
         ws.receive_bytes()  # TTS audio (empty without a speech provider -> browser speaks it)
 
+        # Periodic webcam snapshot: accepted silently, no reply, doesn't disturb the turn order.
+        ws.send_json({"type": "camera_frame", "image": "data:image/jpeg;base64,AAAA"})
+        ws.send_json({"type": "camera_frame", "image": "not-an-image"})
         ws.send_json({"type": "user_text", "text": "I built a caching layer with Redis to cut latency."})
         assert ws.receive_json() == {
             "type": "transcript",
@@ -163,6 +166,21 @@ def test_live_interview_rejects_bad_token(client, auth_headers, candidate):
 )
 def test_resolve_language(tag, expected):
     assert resolve_language(tag) == expected
+
+
+def test_long_spoken_reply_is_trimmed_but_keeps_the_closing_question():
+    from app.services.live_interview_service import MAX_SPOKEN_CHARS, limit_spoken_length
+
+    review = (
+        "Thanks, I've looked at both functions. The f-string in get_user is a SQL injection risk. "
+        + "There is a lot more detail here about parameterized queries and drivers. " * 12
+        + "Was skipping the first sample deliberate?"
+    )
+    spoken = limit_spoken_length(review)
+    assert len(spoken) <= MAX_SPOKEN_CHARS
+    assert spoken.startswith("Thanks, I've looked at both functions.")
+    assert spoken.endswith("Was skipping the first sample deliberate?")
+    assert limit_spoken_length("Short and sweet. Any questions?") == "Short and sweet. Any questions?"
 
 
 def test_spoken_text_drops_markdown_but_keeps_words():

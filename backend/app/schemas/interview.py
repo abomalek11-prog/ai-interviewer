@@ -72,6 +72,13 @@ class QuestionInsight(BaseModel):
     comment: str
 
 
+class PresenceAnalysis(BaseModel):
+    summary: str
+    observations: list[str]
+    flags: list[str]
+    frames_analyzed: int
+
+
 class SessionEvaluationRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -84,6 +91,7 @@ class SessionEvaluationRead(BaseModel):
     strengths: list[str]
     improvements: list[str]
     question_breakdown: list[QuestionInsight]
+    presence: PresenceAnalysis | None = None
 
 
 class SessionRead(BaseModel):

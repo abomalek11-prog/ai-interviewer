@@ -53,6 +53,19 @@ class Settings(BaseSettings):
     OPENROUTER_API_KEY: str | None = None
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     OPENROUTER_MODELS: str = "nvidia/nemotron-3-ultra-550b-a55b:free,nvidia/nemotron-3-super-120b-a12b:free,openrouter/free"
+    # Image-capable models, tried in order for screen-share turns and the presence analysis.
+    # The text models above can't see images. Measured: nano-omni reads code off a screenshot
+    # in ~9s; Gemma is better but usually rate-limited upstream; dots is slow and verbose.
+    OPENROUTER_VISION_MODELS: str = (
+        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free,google/gemma-4-31b-it:free,"
+        "dots-studio/dots-3-note-preview:free"
+    )
+
+    # OpenRouter reasoning effort per kind of call (none|minimal|low|medium|high). Thinking
+    # was the bulk of the delay: a spoken turn took 10-20s at "low" and 1-3s at "none".
+    AI_REASONING_CHAT: str = "none"
+    AI_REASONING_VISION: str = "medium"  # "low" missed the bugs in a code screenshot
+    AI_REASONING_EVAL: str = "low"
 
     OTP_EXPIRE_MINUTES: int = 10
     OTP_MAX_ATTEMPTS: int = 5
@@ -168,7 +181,8 @@ class Settings(BaseSettings):
                         else f"OpenRouter - {model.removesuffix(':free')}" + (" (free)" if model.endswith(":free") else "")
                     ),
                     "model": model,
-                    "vision_model": model,
+                    # Comma-separated fallback list; the provider walks it in order.
+                    "vision_model": self.OPENROUTER_VISION_MODELS,
                     "api_key": self.OPENROUTER_API_KEY,
                     "base_url": self.OPENROUTER_BASE_URL,
                 }

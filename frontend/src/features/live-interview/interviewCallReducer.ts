@@ -4,6 +4,8 @@ export type CallState =
   | "listening"
   | "candidate_speaking"
   | "processing"
+  // End requested; the backend is writing the evaluation (~a minute on free models).
+  | "finishing"
   | "ended"
   | "mic_error";
 
@@ -37,6 +39,7 @@ export type CallEvent =
   | { type: "ai_audio_ended" }
   | { type: "transcript"; text: string }
   | { type: "notice"; message: string }
+  | { type: "end_requested" }
   | { type: "summary"; overallScore: number | null }
   | { type: "socket_error"; message: string }
   | { type: "socket_closed" }
@@ -100,7 +103,17 @@ export function transition(state: InterviewCallState, event: CallEvent, deps: Tr
       return { ...state, call: "listening" };
 
     case "notice":
-      return { ...state, call: state.call === "ended" ? state.call : "listening", notice: event.message };
+      return {
+        ...state,
+        call: state.call === "ended" || state.call === "finishing" ? state.call : "listening",
+        notice: event.message,
+      };
+
+    case "end_requested":
+      if (state.call === "ended" || state.call === "mic_error" || state.call === "finishing") return state;
+      // The interviewer stops mid-sentence; the wait for the report must not look like a freeze.
+      deps.stopAiPlayback();
+      return { ...state, call: "finishing", notice: null };
 
     case "summary":
       return { ...state, call: "ended", overallScore: event.overallScore };

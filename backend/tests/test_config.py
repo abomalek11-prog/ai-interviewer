@@ -58,8 +58,9 @@ def test_openrouter_models_become_ordered_profiles_ahead_of_openai():
     gemma = profiles[0]
     assert gemma["base_url"] == "https://openrouter.ai/api/v1"
     assert gemma["api_key"] == "sk-or"
-    # On OpenRouter the conversation model handles the webcam/screen snapshots itself.
-    assert gemma["vision_model"] == "google/gemma-4-31b-it:free"
+    # Text models can't see images: screenshots go to the dedicated vision fallback list.
+    assert gemma["vision_model"] == settings.OPENROUTER_VISION_MODELS
+    assert gemma["vision_model"].startswith("nvidia/nemotron-3-nano-omni")
     assert gemma["label"] == "OpenRouter - google/gemma-4-31b-it (free)"
     assert profiles[1]["label"] == "OpenRouter - any free model"
 

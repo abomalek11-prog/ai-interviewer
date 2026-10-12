@@ -1,4 +1,15 @@
-import { BrainCircuit, CheckCircle2, MessageSquare, Star, ThumbsUp, TrendingUp, X } from "lucide-react";
+import {
+  BrainCircuit,
+  Camera,
+  CheckCircle2,
+  Eye,
+  MessageSquare,
+  ShieldAlert,
+  Star,
+  ThumbsUp,
+  TrendingUp,
+  X,
+} from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
@@ -11,7 +22,7 @@ import { Card, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAsync } from "@/hooks/useAsync";
 import { cn } from "@/lib/utils";
-import type { InterviewSession } from "@/types/api";
+import type { InterviewSession, PresenceAnalysis } from "@/types/api";
 
 export function CandidateReportPage() {
   const { candidateId } = useParams<{ candidateId: string }>();
@@ -221,6 +232,8 @@ function LiveInterviewInsights({ session }: { session: InterviewSession }) {
               </div>
             </section>
           )}
+
+          {evaluation.presence && <PresenceCard presence={evaluation.presence} />}
         </>
       ) : (
         <Card className="mt-7 p-6 text-sm text-muted-foreground">
@@ -256,6 +269,46 @@ function LiveInterviewInsights({ session }: { session: InterviewSession }) {
         </Card>
       )}
     </>
+  );
+}
+
+function PresenceCard({ presence }: { presence: PresenceAnalysis }) {
+  return (
+    <Card className="mt-7 p-7">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <CardTitle className="flex items-center gap-2">
+          <Camera size={18} className="text-primary" /> On-Camera Presence
+        </CardTitle>
+        <Badge>Not scored</Badge>
+      </div>
+      <p className="mt-2 text-xs text-muted-foreground">
+        From {presence.frames_analyzed} webcam snapshot{presence.frames_analyzed === 1 ? "" : "s"} across the
+        interview. Observable behaviour only - sparse snapshots can mislead, so treat this as context, not evidence.
+      </p>
+      {presence.summary && (
+        <p dir="auto" className="mt-4 text-sm leading-relaxed">
+          {presence.summary}
+        </p>
+      )}
+      <div className="mt-5 grid grid-cols-1 gap-5 md:grid-cols-2">
+        <InsightList
+          title="OBSERVATIONS"
+          icon={<Eye size={15} />}
+          items={presence.observations}
+          className="border-border bg-secondary/5 text-foreground"
+        />
+        <InsightList
+          title="INTEGRITY FLAGS"
+          icon={<ShieldAlert size={15} />}
+          items={presence.flags}
+          className={
+            presence.flags.length > 0
+              ? "border-red-300/60 bg-red-50 text-red-900"
+              : "border-border bg-secondary/5 text-foreground"
+          }
+        />
+      </div>
+    </Card>
   );
 }
 

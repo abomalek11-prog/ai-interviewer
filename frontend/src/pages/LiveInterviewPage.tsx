@@ -1,5 +1,6 @@
 import {
   BrainCircuit,
+  Camera,
   CheckCircle2,
   Ear,
   Loader2,
@@ -45,8 +46,9 @@ function loadSpeechLang(): string {
 }
 
 // Snapshots travel over the websocket as data URLs. A 4K screen at full size is several MB
-// per turn; 1280px wide keeps code legible to the model at a fraction of that.
-const MAX_FRAME_WIDTH = 1280;
+// per turn; 1600px wide keeps editor-sized code legible to the model at a fraction of that.
+const SCREEN_FRAME_WIDTH = 1600;
+const CAMERA_FRAME_WIDTH = 512;
 
 const STATE_LABEL: Record<CallState, string> = {
   connecting: "Connecting...",
@@ -54,6 +56,7 @@ const STATE_LABEL: Record<CallState, string> = {
   listening: "Listening",
   candidate_speaking: "You're speaking...",
   processing: "Thinking...",
+  finishing: "Generating report...",
   ended: "Interview complete",
   mic_error: "Microphone unavailable",
 };
@@ -69,21 +72,24 @@ export function LiveInterviewPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const screenShare = useScreenShare();
 
-  const captureFrame = (): string | null => {
-    // A shared screen is what the candidate wants the interviewer to look at, so it wins.
-    const sharing = Boolean(screenShare.stream);
-    const video = sharing ? screenVideoRef.current : videoRef.current;
+  const snapshot = (video: HTMLVideoElement | null, maxWidth: number, quality: number): string | null => {
     const canvas = canvasRef.current;
     if (!video || !canvas || video.videoWidth === 0) return null;
-    const scale = Math.min(1, MAX_FRAME_WIDTH / video.videoWidth);
+    const scale = Math.min(1, maxWidth / video.videoWidth);
     canvas.width = Math.round(video.videoWidth * scale);
     canvas.height = Math.round(video.videoHeight * scale);
     const ctx = canvas.getContext("2d");
     if (!ctx) return null;
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    // Higher quality for the screen: JPEG artifacts around small code glyphs hurt legibility.
-    return canvas.toDataURL("image/jpeg", sharing ? 0.85 : 0.7);
+    return canvas.toDataURL("image/jpeg", quality);
   };
+
+  // Code has to stay legible to the model: wide and high quality (JPEG artifacts around
+  // small glyphs hurt). Only when actually sharing - otherwise the turn stays text-only.
+  const captureScreenFrame = () =>
+    screenShare.stream ? snapshot(screenVideoRef.current, SCREEN_FRAME_WIDTH, 0.85) : null;
+  // Posture and gaze read fine at a small size, which keeps the presence request light.
+  const captureCameraFrame = () => snapshot(videoRef.current, CAMERA_FRAME_WIDTH, 0.7);
 
   const {
     state,
@@ -97,7 +103,7 @@ export function LiveInterviewPage() {
     endInterview,
     retryMic,
     speechRecognitionSupported,
-  } = useInterviewCallState({ sessionId, speechLang, captureFrame });
+  } = useInterviewCallState({ sessionId, speechLang, captureScreenFrame, captureCameraFrame });
 
   useEffect(() => {
     if (videoRef.current) videoRef.current.srcObject = stream;
@@ -139,6 +145,12 @@ export function LiveInterviewPage() {
       {screenShare.error && <p className="mb-4 text-sm text-destructive">{screenShare.error}</p>}
       {voiceNotice && <p className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">{voiceNotice}</p>}
       {notice && <p className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">{notice}</p>}
+      {call === "finishing" && (
+        <p className="mb-4 flex items-center gap-2 rounded-lg border border-primary/40 bg-primary/5 px-3 py-2 text-sm">
+          <Loader2 size={16} className="animate-spin text-primary" />
+          Generating the evaluation report - this usually takes about a minute. Please keep this page open.
+        </p>
+      )}
 
       {call === "mic_error" ? (
         <Card className="grid place-items-center gap-4 p-10 text-center">
@@ -203,6 +215,12 @@ export function LiveInterviewPage() {
                 </div>
               )}
             </Card>
+            {/* Candidates must know their camera is analysed - and what is not done with it. */}
+            <p className="-mt-3 flex items-start gap-1.5 text-xs text-muted-foreground">
+              <Camera size={14} className="mt-0.5 shrink-0" />
+              Periodic camera snapshots are reviewed for on-camera presence (eye contact, posture, engagement). They
+              are not stored and do not affect your technical score.
+            </p>
 
             {call === "candidate_speaking" && liveText && (
               <Card className="border-primary/40 bg-primary/5 px-4 py-3">
@@ -238,7 +256,7 @@ export function LiveInterviewPage() {
                   {screenShare.stream ? "Stop sharing" : "Share screen"}
                 </Button>
               )}
-              <Button variant="outline" onClick={endInterview} className="w-fit">
+              <Button variant="outline" onClick={endInterview} disabled={call === "finishing"} className="w-fit">
                 <PhoneOff size={18} /> End interview
               </Button>
               {speechRecognitionSupported && (

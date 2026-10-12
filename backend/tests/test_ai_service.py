@@ -37,7 +37,7 @@ class FakeProvider:
             raise self.error
         return self.reply
 
-    def converse(self, messages, image_data_url):
+    def converse(self, messages, image_data_url, image_caption=None):
         return self._answer()
 
     def complete_json(self, system_prompt, user_prompt):
@@ -141,10 +141,25 @@ class FakeCompletions:
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=outcome))])
 
 
-def _provider_with(completions: FakeCompletions) -> OpenAIProvider:
-    provider = OpenAIProvider(api_key="key", model="text-model", base_url="https://openrouter.ai/api/v1")
-    provider.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+class FakeClient:
+    def __init__(self, completions: FakeCompletions):
+        self.chat = SimpleNamespace(completions=completions)
+        self.option_calls: list[dict] = []
+
+    def with_options(self, **options):
+        self.option_calls.append(options)
+        return self
+
+
+def _provider_with(completions: FakeCompletions, vision_model: str | None = None) -> OpenAIProvider:
+    provider = OpenAIProvider(
+        api_key="key", model="text-model", base_url="https://openrouter.ai/api/v1", vision_model=vision_model
+    )
+    provider.client = FakeClient(completions)
     return provider
+
+
+IMAGE = "data:image/jpeg;base64,AAAA"
 
 
 def test_openrouter_provider_sends_attribution_headers_and_uses_profile_model():
@@ -179,10 +194,92 @@ def test_text_only_model_rejecting_snapshot_retries_without_it(monkeypatch):
     assert completions.requests[2]["messages"][-1]["content"] == "here is my code"
 
 
-def test_openrouter_requests_keep_reasoning_short_and_hidden():
+def test_spoken_turns_skip_reasoning_for_speed():
     completions = FakeCompletions("ok")
     _provider_with(completions).converse([{"role": "user", "content": "hi"}], None)
-    assert completions.requests[0]["extra_body"] == ai_service.OPENROUTER_REASONING
+    request = completions.requests[0]
+    assert request["model"] == "text-model"
+    assert request["extra_body"] == ai_service.openrouter_reasoning(settings.AI_REASONING_CHAT)
+    assert settings.AI_REASONING_CHAT == "none"
+
+
+def test_screenshot_turn_falls_through_rate_limited_vision_models(monkeypatch):
+    monkeypatch.setattr(OpenAIProvider, "_text_only_models", set())
+    completions = FakeCompletions(_api_error(RateLimitError, 429), "Line 2 builds SQL from user input.")
+    provider = _provider_with(completions, vision_model="vision-a,vision-b")
+
+    reply = provider.converse(
+        [{"role": "user", "content": "Done, is it right?"}], IMAGE, ai_service.IMAGE_CAPTION_SCREEN
+    )
+
+    assert reply == "Line 2 builds SQL from user input."
+    first, second = completions.requests
+    assert (first["model"], second["model"]) == ("vision-a", "vision-b")
+    text_part, image_part = second["messages"][-1]["content"]
+    assert text_part["text"].startswith(ai_service.IMAGE_CAPTION_SCREEN)
+    assert image_part["image_url"]["url"] == IMAGE
+    assert second["extra_body"] == ai_service.openrouter_reasoning(settings.AI_REASONING_VISION)
+    # Rate limits are transient - the model is not written off as text-only.
+    assert OpenAIProvider._text_only_models == set()
+
+
+def test_when_no_vision_model_works_the_turn_is_answered_from_words(monkeypatch):
+    monkeypatch.setattr(OpenAIProvider, "_text_only_models", set())
+    completions = FakeCompletions(_api_error(RateLimitError, 429), "Tell me more about your approach.")
+    provider = _provider_with(completions, vision_model="vision-a")
+
+    reply = provider.converse([{"role": "user", "content": "Done."}], IMAGE, ai_service.IMAGE_CAPTION_SCREEN)
+
+    assert reply == "Tell me more about your approach."
+    fallback = completions.requests[1]
+    assert fallback["model"] == "text-model"
+    # No caption: the model must not be told about a screenshot it can't see.
+    assert fallback["messages"][-1]["content"] == "Done."
+
+
+def test_image_analysis_walks_vision_models_and_parses_json(monkeypatch):
+    monkeypatch.setattr(OpenAIProvider, "_text_only_models", set())
+    completions = FakeCompletions(
+        _api_error(BadRequestError, 400), 'Here you go: {"summary": "Engaged", "observations": [], "flags": []}'
+    )
+    provider = _provider_with(completions, vision_model="text-only-model,vision-b")
+
+    result = provider.analyze_images_json("sys", "3 snapshots", [IMAGE, IMAGE, IMAGE])
+
+    assert result["summary"] == "Engaged"
+    request = completions.requests[1]
+    assert request["model"] == "vision-b"
+    assert len(request["messages"][-1]["content"]) == 4  # prompt + three images
+    assert "text-only-model" in OpenAIProvider._text_only_models
+    assert provider.client.option_calls[-1]["timeout"] == ai_service.EVAL_TIMEOUT_SECONDS
+
+
+def test_image_analysis_raises_when_every_vision_model_fails(monkeypatch):
+    monkeypatch.setattr(OpenAIProvider, "_text_only_models", set())
+    provider = _provider_with(FakeCompletions(_api_error(RateLimitError, 429)), vision_model="vision-a")
+    with pytest.raises(EmptyCompletionError):
+        provider.analyze_images_json("sys", "user", [IMAGE])
+
+
+def test_evaluation_gets_a_long_timeout_and_no_retry():
+    provider = _provider_with(FakeCompletions('{"score": 50}'))
+    provider.complete_json("sys", "user")
+    assert provider.client.option_calls == [{"timeout": ai_service.EVAL_TIMEOUT_SECONDS, "max_retries": 0}]
+
+
+def test_service_sends_the_screenshot_only_to_the_first_profile(two_profiles):
+    seen: list[str | None] = []
+
+    class RecordingProvider(FakeProvider):
+        def converse(self, messages, image_data_url, image_caption=None):
+            seen.append(image_data_url)
+            return super().converse(messages, image_data_url)
+
+    two_profiles["first"] = RecordingProvider(error=_api_error(RateLimitError, 429))
+    two_profiles["second"] = RecordingProvider(reply="ok")
+
+    AIService().converse([{"role": "user", "content": "hi"}], IMAGE, ai_service.IMAGE_CAPTION_SCREEN)
+    assert seen == [IMAGE, None]
 
 
 def test_bad_request_without_image_is_not_swallowed():
@@ -195,6 +292,25 @@ def test_blank_reply_raises_empty_completion():
     provider = _provider_with(FakeCompletions("   "))
     with pytest.raises(EmptyCompletionError):
         provider.converse([{"role": "user", "content": "hi"}], None)
+
+
+def test_http_200_without_choices_falls_through_to_the_next_vision_model(monkeypatch):
+    # Seen live from OpenRouter: status 200, `choices: null`, the upstream failure in `error`.
+    monkeypatch.setattr(OpenAIProvider, "_text_only_models", set())
+
+    class Completions(FakeCompletions):
+        def create(self, **kwargs):
+            if kwargs["model"] == "vision-a":
+                self.requests.append(kwargs)
+                return SimpleNamespace(choices=None, model_extra={"error": {"code": 502}})
+            return super().create(**kwargs)
+
+    completions = Completions("I can see line 2 interpolates user input into SQL.")
+    provider = _provider_with(completions, vision_model="vision-a,vision-b")
+
+    reply = provider.converse([{"role": "user", "content": "Done."}], IMAGE, ai_service.IMAGE_CAPTION_SCREEN)
+    assert reply == "I can see line 2 interpolates user input into SQL."
+    assert [r["model"] for r in completions.requests] == ["vision-a", "vision-b"]
 
 
 def test_complete_json_accepts_fenced_reply():

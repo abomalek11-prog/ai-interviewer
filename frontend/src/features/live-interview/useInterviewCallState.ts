@@ -14,16 +14,30 @@ const SpeechRecognitionImpl: any =
 interface UseInterviewCallStateOptions {
   sessionId: string | undefined;
   speechLang: string;
-  captureFrame?: () => string | null;
+  /** Screenshot of the shared screen, or null when not sharing. Sent with each turn. */
+  captureScreenFrame?: () => string | null;
+  /** Small webcam snapshot, sent periodically for the end-of-interview presence analysis. */
+  captureCameraFrame?: () => string | null;
   vadThresholds?: Partial<VadThresholds>;
 }
+
+// One webcam snapshot every 30s (plus one shortly after the start); the backend keeps an
+// evenly spread sample of at most 6 and analyses them in a single request at the end.
+const CAMERA_SNAPSHOT_INTERVAL_MS = 30_000;
+const FIRST_CAMERA_SNAPSHOT_MS = 8_000;
 
 /**
  * Orchestrates the mic stream, VAD, AI audio playback, and the live-interview socket
  * into a single call state machine. This is the only piece that wires those four
  * independent hooks together - each of them stays testable/replaceable in isolation.
  */
-export function useInterviewCallState({ sessionId, speechLang, captureFrame, vadThresholds }: UseInterviewCallStateOptions) {
+export function useInterviewCallState({
+  sessionId,
+  speechLang,
+  captureScreenFrame,
+  captureCameraFrame,
+  vadThresholds,
+}: UseInterviewCallStateOptions) {
   const [micRetryKey, setMicRetryKey] = useState(0);
   const mic = useMicStream(true, micRetryKey);
 
@@ -44,8 +58,10 @@ export function useInterviewCallState({ sessionId, speechLang, captureFrame, vad
   const langRef = useRef(speechLang);
   langRef.current = speechLang;
   const lastAiTextRef = useRef("");
-  const captureFrameRef = useRef(captureFrame);
-  captureFrameRef.current = captureFrame;
+  const captureScreenFrameRef = useRef(captureScreenFrame);
+  captureScreenFrameRef.current = captureScreenFrame;
+  const captureCameraFrameRef = useRef(captureCameraFrame);
+  captureCameraFrameRef.current = captureCameraFrame;
 
   const [liveText, setLiveText] = useState("");
   const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
@@ -103,9 +119,29 @@ export function useInterviewCallState({ sessionId, speechLang, captureFrame, vad
     sendLanguageRef.current(speechLang);
   }, [speechLang]);
 
+  // Periodic webcam snapshots for the presence analysis. Separate from turns, so a normal
+  // spoken turn carries no image and stays on the fast text-only model.
+  const sendCameraFrame = socket.sendCameraFrame;
+  useEffect(() => {
+    if (!sessionId) return;
+    const snap = () => {
+      const call = stateRef.current.call;
+      if (call === "connecting" || call === "finishing" || call === "ended" || call === "mic_error") return;
+      const frame = captureCameraFrameRef.current?.();
+      if (frame) sendCameraFrame(frame);
+    };
+    const first = window.setTimeout(snap, FIRST_CAMERA_SNAPSHOT_MS);
+    const interval = window.setInterval(snap, CAMERA_SNAPSHOT_INTERVAL_MS);
+    return () => {
+      window.clearTimeout(first);
+      window.clearInterval(interval);
+    };
+  }, [sessionId, sendCameraFrame]);
+
   const submitTurn = useCallback<TransitionDeps["submitTurn"]>(
     (input) => {
-      const frame = captureFrameRef.current?.();
+      // Only while screen sharing: the screenshot routes this turn to a vision model.
+      const frame = captureScreenFrameRef.current?.();
       if (frame) socket.sendFrame(frame);
       if (input.text) {
         socket.sendUserText(input.text);
@@ -271,7 +307,10 @@ export function useInterviewCallState({ sessionId, speechLang, captureFrame, vad
     };
   }, []);
 
-  const endInterview = useCallback(() => socket.sendEnd(), [socket]);
+  const endInterview = useCallback(() => {
+    dispatch({ type: "end_requested" });
+    socket.sendEnd();
+  }, [dispatch, socket]);
   const retryMic = useCallback(() => setMicRetryKey((k) => k + 1), []);
 
   const manualModeAvailable = vad.status === "error";

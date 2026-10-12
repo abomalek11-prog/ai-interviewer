@@ -113,6 +113,9 @@ class SessionEvaluation(Base):
     improvements: Mapped[list[str]] = mapped_column(JSON, default=list)
     # [{"topic": str, "score": int, "comment": str}] - one entry per question actually discussed.
     question_breakdown: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    # {"summary", "observations", "flags", "frames_analyzed"} from webcam snapshots.
+    # Reported alongside the evaluation but never part of the score.
+    presence: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     session: Mapped["InterviewSession"] = relationship(back_populates="evaluation")

@@ -1,14 +1,19 @@
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
 from app.models.enums import MessageRole, SessionStatus
 from app.models.interview import ConversationMessage, InterviewSession, SessionEvaluation
-from app.services.ai_service import AIService
+from app.services.ai_service import IMAGE_CAPTION_SCREEN, AIService
 
 logger = logging.getLogger("app.live_interview")
+
+# Snapshots sent in one presence-analysis request. More adds payload and latency without
+# telling the model much more about posture or eye contact.
+MAX_CAMERA_FRAMES = 6
 
 
 # BCP-47 tag from the client -> (name for the prompt, ISO-639-1 code for Whisper).
@@ -52,12 +57,38 @@ def _as_breakdown(value: object) -> list[dict]:
     return breakdown
 
 
+# A spoken turn longer than this is a monologue (~40s of speech). Seen from verbose vision
+# models that ignore the "2-4 sentences" instruction while reviewing code.
+MAX_SPOKEN_CHARS = 600
+
+
 def to_spoken_text(text: str) -> str:
     """Strip markdown the model adds despite instructions; TTS would read the symbols aloud."""
     text = re.sub(r"(\*\*|__|`)", "", text)
     text = re.sub(r"(?<!\w)\*(?!\s)(.+?)(?<!\s)\*(?!\w)", r"\1", text)  # *emphasis*
     text = re.sub(r"^\s{0,3}(#{1,6}|[-*•]|\d+[.)])\s+", "", text, flags=re.MULTILINE)  # headings, bullets
-    return re.sub(r"\s*\n\s*", " ", text).strip()
+    return limit_spoken_length(re.sub(r"\s*\n\s*", " ", text).strip())
+
+
+def limit_spoken_length(text: str, max_chars: int = MAX_SPOKEN_CHARS) -> str:
+    """Trim an over-long reply to its opening sentences, keeping the closing question.
+
+    The question at the end is what hands the turn back to the candidate, so it survives
+    the cut even when the middle goes.
+    """
+    if len(text) <= max_chars:
+        return text
+    sentences = [s for s in re.split(r"(?<=[.!?؟])\s+", text) if s]
+    question = next((s for s in reversed(sentences) if s.rstrip().endswith(("?", "؟"))), None)
+    budget = max_chars - (len(question) + 1 if question else 0)
+    kept: list[str] = []
+    for sentence in sentences:
+        if sentence == question or len(" ".join([*kept, sentence])) > budget:
+            break
+        kept.append(sentence)
+    if question:
+        kept.append(question)
+    return " ".join(kept) or text[:max_chars]
 
 
 def resolve_language(tag: str | None) -> tuple[str, str]:
@@ -73,6 +104,18 @@ class LiveInterviewService:
         self.session = session
         self.ai_service = AIService(preferred_profile_id=session.ai_model_profile_id)
         self.language_name, self.language_code = resolve_language(language_tag)
+        # Webcam snapshots for the end-of-interview presence analysis. Memory only, for the
+        # life of this connection - pictures of candidates are never written to disk or DB.
+        self.camera_frames: list[str] = []
+
+    def add_camera_frame(self, image_data_url: str) -> None:
+        """Keep a bounded sample spread across the whole interview, not just its last minutes."""
+        if not image_data_url.startswith("data:image/"):
+            return
+        self.camera_frames.append(image_data_url)
+        if len(self.camera_frames) > MAX_CAMERA_FRAMES:
+            # Halve by dropping every other frame: the sample stays evenly spread in time.
+            self.camera_frames = self.camera_frames[::2]
 
     def set_language(self, language_tag: str) -> None:
         """Switch the interview language mid-conversation (candidate changed the selector)."""
@@ -87,10 +130,10 @@ class LiveInterviewService:
             f'- "{job.title}". Difficulty: {self.session.difficulty}. '
             f"Conduct the entire interview in {self.language_name}, including your very first greeting. "
             f"Always reply in {self.language_name} even if the candidate uses another language. "
-            "A turn may come with a snapshot: either the candidate's webcam, or their shared screen. "
-            "If it shows code, a diagram or a whiteboard, read it carefully and treat it as part of their answer - "
-            "point out bugs, ask about specific lines or design choices you can see. If it is the webcam, react "
-            "naturally only if relevant and keep the focus on the interview. Ask one question at a time, listen to "
+            "When the candidate shares their screen, their turn comes with a screenshot of it. Read it carefully "
+            "and treat it as part of their answer: check code line by line for bugs, security issues, edge cases "
+            "and complexity, and ask about specific lines or design choices you can see. Never claim to see a "
+            "screen when no screenshot is attached. Ask one question at a time, listen to "
             "the answer, then ask a natural, adaptive follow-up or move to a new topic. Keep responses concise "
             "(2-4 sentences), conversational, and spoken aloud - no markdown, no lists.\n"
             "Turn-taking rules - follow them strictly:\n"
@@ -161,7 +204,13 @@ class LiveInterviewService:
         self._persist(MessageRole.CANDIDATE, candidate_text)
 
         messages = self._history_messages()
-        ai_text = to_spoken_text(self.ai_service.converse(messages, image_data_url=frame_data_url))
+        ai_text = to_spoken_text(
+            self.ai_service.converse(
+                messages,
+                image_data_url=frame_data_url,
+                image_caption=IMAGE_CAPTION_SCREEN if frame_data_url else None,
+            )
+        )
         self._persist(MessageRole.AI, ai_text)
         self.db.commit()
 
@@ -217,13 +266,20 @@ class LiveInterviewService:
                 f"Transcript:\n{transcript}"
             )
 
+            # Both are slow network calls with no DB access, so run them side by side: the
+            # presence analysis then adds no wait on top of the evaluation.
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                evaluation_future = pool.submit(self.ai_service._complete_json_with_fallback, system_prompt, user_prompt)
+                presence_future = pool.submit(self._analyze_presence)
             try:
-                result = self.ai_service._complete_json_with_fallback(system_prompt, user_prompt)
+                result = evaluation_future.result()
                 score = self._stable_overall_score(result)
                 evaluation = self._build_evaluation(result, score)
             except Exception:
                 logger.exception("Final evaluation failed for session_id=%s", self.session.id)
                 score = None
+            if evaluation is not None:
+                evaluation.presence = presence_future.result()
 
         if evaluation is not None:
             # Replaces any earlier evaluation (delete-orphan) if the session is finished twice.
@@ -235,6 +291,43 @@ class LiveInterviewService:
         self.db.commit()
         self.db.refresh(self.session)
         return self.session
+
+    def _analyze_presence(self) -> dict | None:
+        """Describe observable on-camera behaviour from the sampled webcam frames.
+
+        Deliberately limited to what is visible (gaze toward the screen, posture, framing,
+        distractions, other people) and kept out of the score: inferring emotions,
+        personality or traits from faces is unreliable, biased against disability and
+        culture, and in the EU banned outright for hiring.
+        """
+        frames = list(self.camera_frames)
+        if not frames:
+            return None
+        system_prompt = (
+            "You review webcam snapshots taken at intervals during a remote job interview and describe "
+            "ONLY directly observable, job-relevant presence. Return only a JSON object with keys:\n"
+            "- summary: 2-3 sentences on overall on-camera presence\n"
+            "- observations: JSON array of short strings covering, where visible: eye contact / gaze toward "
+            "the screen or camera, posture, attentiveness and engagement, framing and lighting, background "
+            "distractions\n"
+            "- flags: JSON array of short strings ONLY for concrete integrity concerns visible in a snapshot "
+            "(another person in view, candidate absent from frame, reading from a phone or second device); "
+            "empty array if none\n"
+            "Strict rules: do not infer emotions, mood, personality, honesty or confidence from facial "
+            "expressions; do not mention appearance, age, gender, ethnicity, religion, health or disability; "
+            "describe behaviour, not the person. Snapshots are sparse, so note uncertainty instead of guessing. "
+            f"Write every text field in {self.language_name}."
+        )
+        user_prompt = f"{len(frames)} webcam snapshots in chronological order, spread across the interview."
+        result = self.ai_service.analyze_images_json(system_prompt, user_prompt, frames)
+        if not isinstance(result, dict):
+            return None
+        return {
+            "summary": str(result.get("summary") or "").strip(),
+            "observations": _as_string_list(result.get("observations")),
+            "flags": _as_string_list(result.get("flags")),
+            "frames_analyzed": len(frames),
+        }
 
     @staticmethod
     def _build_evaluation(result: object, score: int | None) -> SessionEvaluation | None:

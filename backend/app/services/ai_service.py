@@ -28,17 +28,43 @@ logger = logging.getLogger("app.ai")
 MAX_REPLY_TOKENS = 1200  # spoken interview turn: 2-4 sentences + reasoning
 MAX_JSON_TOKENS = 3000   # evaluation / generated question set + reasoning
 
-# Sent to OpenRouter only: keep reasoning short (latency in a live conversation) and out
-# of the reply text. Models without reasoning ignore it.
-OPENROUTER_REASONING = {"reasoning": {"effort": "low", "exclude": True}}
-
 # Fail fast so a stalled free model hands over to the next profile instead of hanging
 # the live interview for the SDK's 10-minute default.
 REQUEST_TIMEOUT_SECONDS = 60
+# The end-of-interview evaluation reasons over the whole transcript and regularly needs
+# ~60s. At the conversational timeout it was cut off and retried, doubling the wait.
+EVAL_TIMEOUT_SECONDS = 150
+
+IMAGE_CAPTION_SCREEN = (
+    "[Attached: a screenshot of the candidate's shared screen, taken as they finished speaking. "
+    "This reply is spoken aloud: at most 3 short sentences - name the single most important issue "
+    "you see, then ask one question. Do not walk through every problem at once.]"
+)
+
+
+def openrouter_reasoning(effort: str) -> dict[str, Any]:
+    """OpenRouter's reasoning control, kept out of the reply text. Models without reasoning ignore it."""
+    return {"reasoning": {"effort": effort, "exclude": True}}
 
 
 class EmptyCompletionError(RuntimeError):
     """The model returned no usable content (e.g. a reasoning model spent the whole budget thinking)."""
+
+
+def completion_text(response: Any, model: str) -> str:
+    """The reply text, or EmptyCompletionError so the caller falls through to the next model.
+
+    OpenRouter sometimes answers HTTP 200 with no `choices` at all and the upstream
+    provider's failure in an `error` field - that must not crash the turn.
+    """
+    choices = getattr(response, "choices", None)
+    if not choices:
+        error = (getattr(response, "model_extra", None) or {}).get("error")
+        raise EmptyCompletionError(f"{model} returned no choices: {error}")
+    content = choices[0].message.content
+    if not content or not content.strip():
+        raise EmptyCompletionError(f"{model} returned an empty reply")
+    return content.strip()
 
 
 def parse_json_content(content: str) -> dict[str, Any] | list[Any]:
@@ -67,7 +93,9 @@ class BaseLLMProvider(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def converse(self, messages: list[dict[str, Any]], image_data_url: str | None) -> str:
+    def converse(
+        self, messages: list[dict[str, Any]], image_data_url: str | None, image_caption: str | None = None
+    ) -> str:
         raise NotImplementedError
 
     @abstractmethod
@@ -96,26 +124,64 @@ class OpenAIProvider(BaseLLMProvider):
             max_retries=1,
         )
         self.model = model
-        self.vision_model = vision_model or settings.OPENAI_VISION_MODEL
+        # Comma-separated fallback list: free vision models are often rate-limited, so the
+        # next one is tried before giving up on the picture.
+        self.vision_models = [m.strip() for m in (vision_model or settings.OPENAI_VISION_MODEL).split(",") if m.strip()]
         self.supports_audio = not base_url or "openai.com" in base_url
-        self.extra_body = OPENROUTER_REASONING if base_url and "openrouter.ai" in base_url else None
+        self.is_openrouter = bool(base_url and "openrouter.ai" in base_url)
+
+    @property
+    def vision_model(self) -> str:
+        return self.vision_models[0]
+
+    def _reasoning(self, effort: str) -> dict[str, Any] | None:
+        return openrouter_reasoning(effort) if self.is_openrouter else None
 
     def complete_json(self, system_prompt: str, user_prompt: str) -> dict[str, Any] | list[Any]:
-        response = self.client.chat.completions.create(
+        response = self.client.with_options(timeout=EVAL_TIMEOUT_SECONDS, max_retries=0).chat.completions.create(
             model=self.model,
             temperature=0.2,
             max_tokens=MAX_JSON_TOKENS,
             response_format={"type": "json_object"},
-            extra_body=self.extra_body,
+            extra_body=self._reasoning(settings.AI_REASONING_EVAL),
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
         )
-        content = response.choices[0].message.content
-        if not content or not content.strip():
-            raise EmptyCompletionError(f"{self.model} returned an empty JSON completion")
-        return parse_json_content(content)
+        return parse_json_content(completion_text(response, self.model))
+
+    def analyze_images_json(self, system_prompt: str, user_prompt: str, images: list[str]) -> dict[str, Any]:
+        """One request over several images (e.g. webcam snapshots), answered as JSON.
+
+        Walks the vision models in order. No response_format: several free vision models
+        reject it, and parse_json_content copes with the looser output.
+        """
+        content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
+        content += [{"type": "image_url", "image_url": {"url": image}} for image in images]
+        last_error: Exception | None = None
+        for model in self.vision_models:
+            if model in self._text_only_models:
+                continue
+            try:
+                response = self.client.with_options(timeout=EVAL_TIMEOUT_SECONDS, max_retries=0).chat.completions.create(
+                    model=model,
+                    temperature=0.2,
+                    max_tokens=MAX_JSON_TOKENS,
+                    extra_body=self._reasoning(settings.AI_REASONING_VISION),
+                    messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": content}],
+                )
+                result = parse_json_content(completion_text(response, model))
+                if isinstance(result, dict):
+                    return result
+                raise ValueError(f"{model} returned {type(result).__name__}, expected an object")
+            except (BadRequestError, NotFoundError) as exc:
+                self._text_only_models.add(model)
+                last_error = exc
+            except (APIError, APITimeoutError, APIConnectionError, EmptyCompletionError, ValueError) as exc:
+                last_error = exc
+            logger.warning("Vision model %s failed image analysis: %s", model, last_error)
+        raise EmptyCompletionError("No vision model could analyze the images") from last_error
 
     def transcribe(self, audio_bytes: bytes, filename: str, language: str | None = None) -> str:
         # Without the hint Whisper guesses the language per utterance and often mis-detects
@@ -126,43 +192,54 @@ class OpenAIProvider(BaseLLMProvider):
         )
         return result.text
 
-    def converse(self, messages: list[dict[str, Any]], image_data_url: str | None) -> str:
-        chat_messages = list(messages)
-        attached_image = bool(
-            image_data_url
-            and chat_messages
-            and chat_messages[-1]["role"] == "user"
-            and self.vision_model not in self._text_only_models
-        )
-        if attached_image:
-            last = chat_messages[-1]
-            chat_messages[-1] = {
+    def converse(
+        self, messages: list[dict[str, Any]], image_data_url: str | None, image_caption: str | None = None
+    ) -> str:
+        if image_data_url and messages and messages[-1]["role"] == "user":
+            reply = self._converse_with_image(messages, image_data_url, image_caption)
+            if reply is not None:
+                return reply
+            # No vision model could take the picture. Losing it is far better than losing
+            # the turn, so answer from the words alone (and say nothing about an image).
+            logger.warning("No vision model available for this turn; answering text-only")
+        return self._complete_reply(self.model, list(messages), settings.AI_REASONING_CHAT)
+
+    def _converse_with_image(
+        self, messages: list[dict[str, Any]], image_data_url: str, image_caption: str | None
+    ) -> str | None:
+        text = messages[-1]["content"]
+        if image_caption:
+            text = f"{image_caption}\n{text}"
+        with_image = [
+            *messages[:-1],
+            {
                 "role": "user",
-                "content": [
-                    {"type": "text", "text": last["content"]},
-                    {"type": "image_url", "image_url": {"url": image_data_url}},
-                ],
-            }
-        try:
-            response = self.client.chat.completions.create(
-                model=self.vision_model,
-                temperature=0.6,
-                max_tokens=MAX_REPLY_TOKENS,
-                extra_body=self.extra_body,
-                messages=chat_messages,
-            )
-        except (BadRequestError, NotFoundError):
-            if not attached_image:
-                raise
-            # A text-only model rejects the snapshot. Losing the picture is far better than
-            # losing the turn, so answer from the words alone.
-            logger.warning("Model %s rejected the image input; retrying the turn text-only", self.vision_model)
-            self._text_only_models.add(self.vision_model)
-            return self.converse(messages, None)
-        content = response.choices[0].message.content
-        if not content or not content.strip():
-            raise EmptyCompletionError(f"{self.vision_model} returned an empty reply")
-        return content.strip()
+                "content": [{"type": "text", "text": text}, {"type": "image_url", "image_url": {"url": image_data_url}}],
+            },
+        ]
+        for model in self.vision_models:
+            if model in self._text_only_models:
+                continue
+            try:
+                return self._complete_reply(model, with_image, settings.AI_REASONING_VISION)
+            except (BadRequestError, NotFoundError) as exc:
+                # Text-only model: remember it so later turns don't pay for the rejection
+                # again (the free quota is 50 requests a day).
+                self._text_only_models.add(model)
+                logger.warning("Model %s rejected the image input: %s", model, exc)
+            except (APIError, APITimeoutError, APIConnectionError, EmptyCompletionError) as exc:
+                logger.warning("Vision model %s failed this turn: %s", model, exc)
+        return None
+
+    def _complete_reply(self, model: str, messages: list[dict[str, Any]], effort: str) -> str:
+        response = self.client.chat.completions.create(
+            model=model,
+            temperature=0.6,
+            max_tokens=MAX_REPLY_TOKENS,
+            extra_body=self._reasoning(effort),
+            messages=messages,
+        )
+        return completion_text(response, model)
 
     def speak(self, text: str) -> bytes:
         response = self.client.audio.speech.create(
@@ -297,7 +374,9 @@ class MockLLMProvider(BaseLLMProvider):
         system = next((str(m.get("content", "")) for m in messages if m.get("role") == "system"), "")
         return "Arabic" if "in Arabic" in system else "English"
 
-    def converse(self, messages: list[dict[str, Any]], image_data_url: str | None) -> str:
+    def converse(
+        self, messages: list[dict[str, Any]], image_data_url: str | None, image_caption: str | None = None
+    ) -> str:
         turn_count = sum(1 for m in messages if m["role"] == "assistant")
         banner, opening, follow_up = self._DEMO_SCRIPT[self._demo_language(messages)]
         if turn_count == 0:
@@ -427,19 +506,25 @@ class AIService:
 
         raise RuntimeError("Voice transcription failed") from last_error
 
-    def converse(self, messages: list[dict[str, Any]], image_data_url: str | None = None) -> str:
+    def converse(
+        self, messages: list[dict[str, Any]], image_data_url: str | None = None, image_caption: str | None = None
+    ) -> str:
         if self.provider is not None:
-            return self.provider.converse(messages, image_data_url)
+            return self.provider.converse(messages, image_data_url, image_caption)
 
         profiles = self._ordered_profiles()
         if not profiles:
             return MockLLMProvider().converse(messages, image_data_url)
 
         last_error: Exception | None = None
-        for profile in profiles:
+        for index, profile in enumerate(profiles):
             try:
                 provider = self._build_provider(profile)
-                return provider.converse(messages, image_data_url)
+                # The first profile already walked every vision model; if it still failed,
+                # retrying the same (shared, rate-limited) vision models per profile only
+                # adds delay - later profiles answer from the words.
+                image = image_data_url if index == 0 else None
+                return provider.converse(messages, image, image_caption)
             except (RateLimitError, APITimeoutError, APIConnectionError, APIError, EmptyCompletionError) as exc:
                 last_error = exc
                 logger.warning(
@@ -454,6 +539,24 @@ class AIService:
                 return MockLLMProvider().converse(messages, image_data_url)
             raise last_error
         return MockLLMProvider().converse(messages, image_data_url)
+
+    def analyze_images_json(self, system_prompt: str, user_prompt: str, images: list[str]) -> dict[str, Any] | None:
+        """Vision analysis over several images, or None when no configured model can do it.
+
+        Unlike the other calls there is no offline fallback: inventing observations about
+        a person from pictures nobody looked at would be worse than reporting none.
+        """
+        providers: list[BaseLLMProvider] = (
+            [self.provider] if self.provider is not None else [self._build_provider(p) for p in self._ordered_profiles()[:1]]
+        )
+        for provider in providers:
+            if not isinstance(provider, OpenAIProvider):
+                continue
+            try:
+                return provider.analyze_images_json(system_prompt, user_prompt, images)
+            except Exception as exc:
+                logger.warning("Image analysis failed: %s", exc)
+        return None
 
     def synthesize_speech(self, text: str) -> bytes:
         """Return synthesized audio, or b"" if unavailable.

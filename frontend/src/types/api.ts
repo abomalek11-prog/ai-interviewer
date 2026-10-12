@@ -120,6 +120,15 @@ export interface SessionEvaluation {
   strengths: string[];
   improvements: string[];
   question_breakdown: QuestionInsight[];
+  /** From webcam snapshots; reported separately and never part of the score. */
+  presence: PresenceAnalysis | null;
+}
+
+export interface PresenceAnalysis {
+  summary: string;
+  observations: string[];
+  flags: string[];
+  frames_analyzed: number;
 }
 
 export interface InterviewSession {

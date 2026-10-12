@@ -93,9 +93,16 @@ export function useLiveInterviewSocket(
     };
   }, [sessionId]);
 
+  /** Shared-screen screenshot, attached by the backend to the turn that follows it. */
   const sendFrame = useCallback((image: string) => {
     const ws = wsRef.current;
     if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "frame", image }));
+  }, []);
+
+  /** Periodic webcam snapshot, kept in memory server-side for the end-of-interview presence analysis. */
+  const sendCameraFrame = useCallback((image: string) => {
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "camera_frame", image }));
   }, []);
 
   const sendUserText = useCallback((text: string) => {
@@ -120,5 +127,5 @@ export function useLiveInterviewSocket(
 
   const isOpen = useCallback(() => wsRef.current?.readyState === WebSocket.OPEN, []);
 
-  return { sendFrame, sendUserText, sendAudio, sendEnd, sendLanguage, isOpen };
+  return { sendFrame, sendCameraFrame, sendUserText, sendAudio, sendEnd, sendLanguage, isOpen };
 }

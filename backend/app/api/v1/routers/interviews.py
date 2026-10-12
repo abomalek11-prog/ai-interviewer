@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 
@@ -57,13 +58,25 @@ def submit_answer(session_id: str, payload: AnswerSubmit, db: DbSession, current
     return session
 
 
+# A 1600px screenshot is ~300-600 KB as a JPEG data URL; anything far beyond that is not
+# a frame from our client and would only bloat the AI request.
+MAX_FRAME_CHARS = 4_000_000
+
+
+def _frame(payload: dict) -> str | None:
+    image = payload.get("image")
+    if isinstance(image, str) and image.startswith("data:image/") and len(image) <= MAX_FRAME_CHARS:
+        return image
+    return None
+
+
 async def _send_turn(websocket: WebSocket, live_service: LiveInterviewService, turn: dict) -> None:
     if turn.get("error"):
         await websocket.send_json({"type": "notice", "message": turn["error"]})
         return
     await websocket.send_json({"type": "transcript", "text": turn["candidate_text"]})
     await websocket.send_json({"type": "ai_text", "text": turn["ai_text"]})
-    await websocket.send_bytes(live_service.synthesize(turn["ai_text"]))
+    await websocket.send_bytes(await asyncio.to_thread(live_service.synthesize, turn["ai_text"]))
 
 
 @router.websocket("/{session_id}/live")
@@ -78,10 +91,13 @@ async def live_interview_ws(websocket: WebSocket, session_id: str, db: DbSession
     # already spoken in the candidate's language.
     live_service = LiveInterviewService(db, session, websocket.query_params.get("lang"))
 
+    # The AI calls below are synchronous and take seconds. Run in the event loop they would
+    # freeze every other open interview (and health checks) on this worker for that long,
+    # so each goes to a thread. The DB session is only ever used by one call at a time.
     try:
-        opening_text = live_service.opening_message()
+        opening_text = await asyncio.to_thread(live_service.opening_message)
         await websocket.send_json({"type": "ai_text", "text": opening_text})
-        await websocket.send_bytes(live_service.synthesize(opening_text))
+        await websocket.send_bytes(await asyncio.to_thread(live_service.synthesize, opening_text))
 
         pending_frame: str | None = None
         while True:
@@ -97,15 +113,22 @@ async def live_interview_ws(websocket: WebSocket, session_id: str, db: DbSession
                     continue
 
                 if payload.get("type") == "frame":
-                    pending_frame = payload.get("image")
+                    # Shared-screen screenshot for the next turn (the client only sends one while sharing).
+                    pending_frame = _frame(payload)
+                elif payload.get("type") == "camera_frame":
+                    frame = _frame(payload)
+                    if frame:
+                        live_service.add_camera_frame(frame)
                 elif payload.get("type") == "lang":
                     live_service.set_language(str(payload.get("value") or ""))
                 elif payload.get("type") == "user_text":
-                    turn = live_service.handle_text_turn(str(payload.get("text") or ""), pending_frame)
+                    turn = await asyncio.to_thread(
+                        live_service.handle_text_turn, str(payload.get("text") or ""), pending_frame
+                    )
                     pending_frame = None
                     await _send_turn(websocket, live_service, turn)
                 elif payload.get("type") == "end":
-                    session = live_service.finish()
+                    session = await asyncio.to_thread(live_service.finish)
                     await websocket.send_json(
                         {
                             "type": "summary",
@@ -121,7 +144,7 @@ async def live_interview_ws(websocket: WebSocket, session_id: str, db: DbSession
                 if not audio_bytes:
                     continue
 
-                turn = live_service.handle_turn(audio_bytes, pending_frame)
+                turn = await asyncio.to_thread(live_service.handle_turn, audio_bytes, pending_frame)
                 pending_frame = None
                 await _send_turn(websocket, live_service, turn)
     except WebSocketDisconnect:
