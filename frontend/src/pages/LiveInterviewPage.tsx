@@ -1,4 +1,16 @@
-import { BrainCircuit, CheckCircle2, Ear, Loader2, Mic, MicOff, MonitorUp, MonitorX, PhoneOff, Video } from "lucide-react";
+import {
+  BrainCircuit,
+  CheckCircle2,
+  Ear,
+  Loader2,
+  Mic,
+  MicOff,
+  MonitorUp,
+  MonitorX,
+  PhoneOff,
+  SkipForward,
+  Video,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
@@ -73,8 +85,19 @@ export function LiveInterviewPage() {
     return canvas.toDataURL("image/jpeg", sharing ? 0.85 : 0.7);
   };
 
-  const { state, liveText, stream, manualModeAvailable, beginTurn, endTurn, endInterview, retryMic, speechRecognitionSupported } =
-    useInterviewCallState({ sessionId, speechLang, captureFrame });
+  const {
+    state,
+    liveText,
+    voiceNotice,
+    skipAiSpeech,
+    stream,
+    manualModeAvailable,
+    beginTurn,
+    endTurn,
+    endInterview,
+    retryMic,
+    speechRecognitionSupported,
+  } = useInterviewCallState({ sessionId, speechLang, captureFrame });
 
   useEffect(() => {
     if (videoRef.current) videoRef.current.srcObject = stream;
@@ -114,6 +137,7 @@ export function LiveInterviewPage() {
 
       {connectionError && <p className="mb-4 text-sm text-destructive">{connectionError}</p>}
       {screenShare.error && <p className="mb-4 text-sm text-destructive">{screenShare.error}</p>}
+      {voiceNotice && <p className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">{voiceNotice}</p>}
       {notice && <p className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">{notice}</p>}
 
       {call === "mic_error" ? (
@@ -202,6 +226,11 @@ export function LiveInterviewPage() {
                 <p className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm text-muted-foreground">
                   <Ear size={16} /> Just talk naturally - no need to press anything.
                 </p>
+              )}
+              {call === "ai_speaking" && (
+                <Button variant="dark" onClick={skipAiSpeech} className="w-fit">
+                  <SkipForward size={18} /> Skip - let me answer
+                </Button>
               )}
               {screenShare.supported && (
                 <Button

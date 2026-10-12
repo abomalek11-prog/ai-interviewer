@@ -48,10 +48,28 @@ export function useInterviewCallState({ sessionId, speechLang, captureFrame, vad
   captureFrameRef.current = captureFrame;
 
   const [liveText, setLiveText] = useState("");
+  const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
+
+  // Assigned once the VAD exists further down; the player callbacks only fire later.
+  const vadControlRef = useRef<{ pause: () => void; resume: () => void } | null>(null);
+  // True while the VAD is paused because the OS speech engine is talking: that audio
+  // bypasses echo cancellation, so the mic would hear the AI and "barge in" on its own
+  // first word, cutting every reply off.
+  const vadMutedForAiRef = useRef(false);
 
   const player = useAiAudioPlayer({
     lang: speechLang,
     onEnded: () => dispatch({ type: "ai_audio_ended" }),
+    onPlaybackStart: (source) => {
+      if (source !== "browser" || vadMutedForAiRef.current) return;
+      vadMutedForAiRef.current = true;
+      vadControlRef.current?.pause();
+    },
+    onVoiceUnavailable: () =>
+      setVoiceNotice(
+        "No voice for this language is installed in your browser, so replies are shown as text only. " +
+          "Microsoft Edge includes Arabic voices.",
+      ),
   });
 
   const socket = useLiveInterviewSocket(
@@ -216,6 +234,31 @@ export function useInterviewCallState({ sessionId, speechLang, captureFrame, vad
     },
     onMisfire: () => dispatch({ type: "vad_misfire" }),
   });
+  vadControlRef.current = { pause: vad.pause, resume: vad.resume };
+
+  // The model often finishes loading while the opening greeting is already being spoken,
+  // and it starts listening on load - mute it straight away in that case too.
+  useEffect(() => {
+    if (vad.status === "ready" && vadMutedForAiRef.current) vadControlRef.current?.pause();
+  }, [vad.status]);
+
+  // Un-mute the VAD once the AI has stopped talking (finished, skipped or interrupted).
+  // The short delay keeps the tail of the speech engine's audio from opening a turn.
+  useEffect(() => {
+    if (state.call === "ai_speaking" || !vadMutedForAiRef.current) return;
+    const timer = window.setTimeout(() => {
+      vadMutedForAiRef.current = false;
+      vadControlRef.current?.resume();
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [state.call]);
+
+  /** Candidate cuts the AI short to answer (the VAD can't do it while the AI is muted out). */
+  const skipAiSpeech = useCallback(() => {
+    if (stateRef.current.call !== "ai_speaking") return;
+    player.stop();
+    dispatch({ type: "ai_audio_ended" });
+  }, [dispatch, player]);
 
   useEffect(() => {
     if (mic.error) dispatch({ type: "mic_error", message: mic.error });
@@ -236,6 +279,8 @@ export function useInterviewCallState({ sessionId, speechLang, captureFrame, vad
   return {
     state,
     liveText,
+    voiceNotice,
+    skipAiSpeech,
     stream: mic.stream,
     vadStatus: vad.status,
     manualModeAvailable,
